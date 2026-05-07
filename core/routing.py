@@ -1,0 +1,212 @@
+"""
+End-to-end routing orchestration: naive baselines vs. the research pipeline.
+
+Pipeline (system flow):
+  merged same-location stops  →  greedy batching (dynamic pre-grouping)
+  → DBSCAN clusters  →  nearest-driver assignment
+  → GA within each cluster  →  A* leg distances on a geographic graph
+  → VRPTW feasibility check per route.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from core.batching import greedy_dynamic_batch, merge_same_location_orders
+from core.clustering import cluster_deliveries_dbscan
+from core.driver_assignment import assign_nearest_driver, stops_by_cluster
+from core.ga_optimizer import optimize_route_ga, tour_distance_km
+from core.graph_search import astar_shortest_path, benchmark_dijkstra_vs_astar, build_geographic_graph
+from core.osrm_client import OsrmClient
+from core.vrptw import VRPTWConfig, slack_time_windows, validate_route_feasibility
+from utils import haversine_km
+
+
+@dataclass
+class RouteResult:
+    cluster_id: int
+    driver_id: int
+    stop_order_local: list[int]
+    drop_coords_ordered: list[tuple[float, float]]
+    metas_ordered: list[dict[str, Any]]
+    ga_tour_km: float
+    astar_leg_km: float
+    dijkstra_star_equal: bool
+    vrptw_ok: bool
+    vrptw_detail: dict[str, Any]
+    osrm_road_km: float | None = None
+    osrm_duration_min: float | None = None
+    osrm_geometry: list[tuple[float, float]] | None = None
+    osrm_status: str = "not_requested"
+
+
+def _driver_by_id(drivers: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    return {int(d["driver_id"]): d for d in drivers}
+
+
+def naive_independent_legs_km(
+    stops: list[dict[str, Any]],
+    drivers: list[dict[str, Any]],
+) -> float:
+    """
+    Baseline: each physical stop is served by its closest driver in isolation
+    (no multi-stop chaining). Distance = sum of driver→drop one-way legs.
+    """
+    total = 0.0
+    by_id = _driver_by_id(drivers)
+    for s in stops:
+        drop = tuple(s["drop"])
+        best = float("inf")
+        for d in drivers:
+            best = min(best, haversine_km(tuple(d["current_location"]), drop))
+        total += best
+    return total
+
+
+def astar_tour_length(
+    driver_loc: tuple[float, float],
+    ordered_drops: list[tuple[float, float]],
+    *,
+    knn: int | None = 4,
+) -> tuple[float, list[tuple[float, float, float]]]:
+    """
+    Sum A* shortest-path distances on a kNN geographic graph through all legs.
+
+    Returns total kilometers and per-leg diagnostics (dijkstra_km, astar_km)—identical
+    when both find the same shortest path cost on an undirected nonnegative graph.
+    """
+    nodes = [driver_loc] + ordered_drops
+    G = build_geographic_graph(nodes, knn=knn if len(nodes) > 5 else None)
+    legs = 0.0
+    diag: list[tuple[float, float, float]] = []
+    prev = driver_loc
+    for nxt in ordered_drops:
+        _, ak = astar_shortest_path(G, prev, nxt)
+        dk_pairs = benchmark_dijkstra_vs_astar(G, [(prev, nxt)])
+        dk = dk_pairs[0][0]
+        legs += ak
+        diag.append((dk, ak, abs(dk - ak)))
+        prev = nxt
+    return legs, diag
+
+
+def run_optimized_routes(
+    orders: list[dict[str, Any]],
+    drivers: list[dict[str, Any]],
+    *,
+    dbscan_eps_km: float = 1.2,
+    slack_windows: bool = True,
+    use_osrm: bool = False,
+    osrm_base_url: str = "http://localhost:5000",
+) -> tuple[list[RouteResult], dict[str, Any]]:
+    """
+    Execute the full optimization stack on synthetic/real dict inputs.
+
+    Returns per-cluster `RouteResult` rows and a summary dictionary.
+    """
+    merged, merge_map = merge_same_location_orders(orders)
+    if slack_windows:
+        slack_time_windows(merged, pad_min=45.0)
+
+    _ = greedy_dynamic_batch(orders)  # greedy wave partitioning (dynamic insertion semantics)
+    labels, _ = cluster_deliveries_dbscan(merged, eps_km=dbscan_eps_km, min_samples=2)
+    clusters = stops_by_cluster(labels)
+    assignment = assign_nearest_driver(clusters, merged, drivers)
+    dmap = _driver_by_id(drivers)
+    osrm_client = OsrmClient(osrm_base_url) if use_osrm else None
+
+    results: list[RouteResult] = []
+    osrm_status_counts: dict[str, int] = {}
+    osrm_disabled_status: str | None = None
+
+    for cid, idxs in sorted(clusters.items()):
+        d_id = int(assignment.get(cid, drivers[0]["driver_id"]))
+        drv = dmap[d_id]
+        cluster_coords = [tuple(merged[i]["drop"]) for i in idxs]
+        perm, _ga_fit = optimize_route_ga(cluster_coords, tuple(drv["current_location"]))
+        ordered_drops = [cluster_coords[k] for k in perm]
+        metas = [merged[idxs[k]] for k in perm]
+
+        ga_km = tour_distance_km(perm, cluster_coords, tuple(drv["current_location"]))
+        ast_km, leg_diag = astar_tour_length(tuple(drv["current_location"]), ordered_drops)
+        leg_equal = all(abs(d[2]) <= 1e-9 for d in leg_diag)
+
+        ok, detail = validate_route_feasibility(
+            tuple(drv["current_location"]),
+            ordered_drops,
+            metas,
+            float(drv["capacity"]),
+            VRPTWConfig(),
+        )
+
+        osrm_road_km: float | None = None
+        osrm_duration_min: float | None = None
+        osrm_geometry: list[tuple[float, float]] | None = None
+        osrm_status = "not_requested"
+        if osrm_client is not None:
+            if osrm_disabled_status is not None:
+                osrm_status = osrm_disabled_status
+            else:
+                osrm_route = osrm_client.route([tuple(drv["current_location"])] + ordered_drops)
+                osrm_road_km = osrm_route.road_km
+                osrm_duration_min = osrm_route.duration_min
+                osrm_geometry = osrm_route.geometry
+                osrm_status = osrm_route.status if osrm_route.ok else f"{osrm_route.status}: {osrm_route.message or osrm_route.code}"
+                if osrm_route.status in {"unavailable", "http_error"}:
+                    osrm_disabled_status = osrm_status
+        osrm_status_counts[osrm_status] = osrm_status_counts.get(osrm_status, 0) + 1
+
+        results.append(
+            RouteResult(
+                cluster_id=cid,
+                driver_id=d_id,
+                stop_order_local=perm,
+                drop_coords_ordered=ordered_drops,
+                metas_ordered=metas,
+                ga_tour_km=ga_km,
+                astar_leg_km=ast_km,
+                dijkstra_star_equal=leg_equal,
+                vrptw_ok=ok,
+                vrptw_detail=detail,
+                osrm_road_km=osrm_road_km,
+                osrm_duration_min=osrm_duration_min,
+                osrm_geometry=osrm_geometry,
+                osrm_status=osrm_status,
+            )
+        )
+
+    summary = {
+        "merged_stop_count": len(merged),
+        "clusters": len(clusters),
+        "merge_map": merge_map,
+        "osrm": {
+            "requested": use_osrm,
+            "base_url": osrm_base_url if use_osrm else None,
+            "status_counts": osrm_status_counts,
+        },
+    }
+    return results, summary
+
+
+def summarize_savings(
+    orders: list[dict[str, Any]],
+    drivers: list[dict[str, Any]],
+    route_results: list[RouteResult],
+) -> dict[str, float]:
+    """Compare naive independent legs vs. optimized chained tours (GA + A*)."""
+    merged, _ = merge_same_location_orders(orders)
+    naive_km = naive_independent_legs_km(merged, drivers)
+    opt_ga_km = sum(r.ga_tour_km for r in route_results)
+    opt_ast_km = sum(r.astar_leg_km for r in route_results)
+    osrm_values = [r.osrm_road_km for r in route_results if r.osrm_road_km is not None]
+    opt_osrm_km = sum(osrm_values) if len(osrm_values) == len(route_results) and route_results else 0.0
+    return {
+        "naive_sum_legs_km": naive_km,
+        "optimized_ga_open_tour_km": opt_ga_km,
+        "optimized_astar_graph_km": opt_ast_km,
+        "optimized_osrm_road_km": opt_osrm_km,
+        "saved_km_vs_naive_ga": max(0.0, naive_km - opt_ga_km),
+        "saved_km_vs_naive_astar": max(0.0, naive_km - opt_ast_km),
+        "saved_km_vs_naive_osrm": max(0.0, naive_km - opt_osrm_km) if opt_osrm_km else 0.0,
+    }
