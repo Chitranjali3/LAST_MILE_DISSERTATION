@@ -24,7 +24,8 @@ The default entry point runs everything on **synthetic** orders and drivers cent
 12. [Libraries: what each is for and where it appears](#libraries-what-each-is-for-and-where-it-appears)
 13. [Outputs](#outputs)
 14. [Default synthetic parameters](#default-synthetic-parameters-mainpy)
-15. [License / attribution](#license--attribution)
+15. [Future upgrades](#future-upgrades)
+16. [License / attribution](#license--attribution)
 
 ---
 
@@ -827,6 +828,14 @@ With `--visual-input`:
 - **OSRM URL**: `http://localhost:5000` by default; override with `--osrm-url`.
 
 Adjust these by editing `main.py` or by importing pipeline functions programmatically.
+
+---
+
+## Future upgrades
+
+- **Cost module (planned):** Add a configurable monetary cost engine (fuel, labor, maintenance, fixed trip costs, and penalties) so route optimization can target business cost in addition to distance/time proxies.
+- **Objective modes:** Support `distance_proxy`, `cost`, and a future hybrid objective through CLI flags to compare optimization behavior under different goals.
+- **Cost-aware reporting contract:** Extend JSON output with route-level cost breakdowns, total cost, and a versioned model-input cost feature block for downstream consumers.
 
 ---
 
