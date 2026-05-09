@@ -484,9 +484,10 @@ The right-hand info panel always shows current mode, count of orders/drivers, th
 
 ```bash
 cd /path/to/Last-Mile
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate   # Windows (PowerShell): .\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 ### `requirements.txt` (verbatim minimums)
@@ -513,6 +514,12 @@ If OSRM is not running, the pipeline still completes — every route is tagged w
 
 ## How to run
 
+Run from repo root after activating `venv` and installing dependencies:
+
+```bash
+source venv/bin/activate
+```
+
 **Standard run** (non-interactive pipeline, PNGs saved next to `main.py`, JSON on stdout):
 
 ```bash
@@ -530,7 +537,7 @@ Default pause is **2** seconds (`--pause`).
 **Use local OSRM road routing** after GA sequencing:
 
 ```bash
-python main.py --use-osrm --osrm-url http://localhost:5000
+python main.py --use-osrm --osrm-url http://localhost:5001
 ```
 
 If OSRM is reachable, route results include `osrm_road_km`, `osrm_duration_min`, `osrm_status`, and plotted **road** geometry. If OSRM is offline or rejects a route, Last-Mile still completes using the existing GA/A\* fallback metrics and records the OSRM status in the JSON `pipeline.osrm` block.
@@ -546,7 +553,7 @@ Slide 06 (navigation/VRPTW) shows whether OSRM was requested; slide 08 (summary)
 **Graphical input → process → output app**:
 
 ```bash
-python main.py --visual-input --osrm-url http://localhost:5000
+python main.py --visual-input --osrm-url http://localhost:5001 --viz-mode map
 ```
 
 Use the buttons to add order drops and driver starts by clicking the map, or load a sample dataset. `Run pipeline` opens a visual three-panel result: raw input, cluster/driver assignment process, and optimized output routes. The result is also saved as `output_osrm_visual_process.png`.
@@ -581,6 +588,7 @@ python visual_presenter.py
 | `--use-osrm` | off | Evaluate optimized routes against a local OSRM server and prefer its geometry for plots. |
 | `--osrm-url URL` | `http://localhost:5000` | OSRM base URL. Used by `--use-osrm` and `--visual-input`. |
 | `--visual-input` | off | Launch the click-based graphical I/O app (`visual_osrm_app.py`); short-circuits the JSON-on-stdout flow. |
+| `--viz-mode graph|map` | `map` | Plot mode (`graph` = plain lon/lat grid, `map` = OSM basemap tiles when available). |
 
 ---
 
