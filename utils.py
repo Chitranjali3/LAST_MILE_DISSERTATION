@@ -13,8 +13,14 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
+from map_basemap import pad_lonlat_extent, try_osm_basemap
+
 # Earth mean radius in km (WGS84 approximation for Haversine).
 EARTH_RADIUS_KM = 6371.0088
+
+# Bhubaneswar-area defaults for synthetic data and the visual OSRM app.
+# Matches Geofabrik's ``eastern-zone-latest`` OSRM extract (Odisha lies in that zone).
+ODISHA_REGION_CENTER: tuple[float, float] = (20.2961, 85.8245)
 
 
 def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -44,13 +50,15 @@ def minutes_from_hhmm(hhmm: int) -> int:
 def synthetic_orders(
     n: int = 24,
     seed: int | None = 42,
-    region_center: tuple[float, float] = (12.97, 77.59),  # Bangalore-scale spread
+    region_center: tuple[float, float] = ODISHA_REGION_CENTER,
     spread_deg: float = 0.08,
 ) -> list[dict[str, Any]]:
     """
     Generate synthetic orders with pickup/drop, time windows, and weights.
 
     Intentionally places duplicate drops and collinear triplets for experiments.
+    Defaults cluster around ``ODISHA_REGION_CENTER`` (Bhubaneswar-scale) so points
+    lie inside Geofabrik's ``eastern-zone-latest`` OSRM extract.
     """
     rng = random.Random(seed)
     orders: list[dict[str, Any]] = []
@@ -125,7 +133,7 @@ def synthetic_orders(
 def synthetic_drivers(
     k: int = 4,
     seed: int | None = 42,
-    region_center: tuple[float, float] = (12.97, 77.59),
+    region_center: tuple[float, float] = ODISHA_REGION_CENTER,
 ) -> list[dict[str, Any]]:
     rng = random.Random(seed)
     drivers = []
@@ -149,11 +157,24 @@ def plot_clusters_and_routes(
     routes: list[list[tuple[float, float]]],
     title: str,
     save_path: str | None = "output_clusters_routes.png",
+    *,
+    viz_mode: str = "map",
 ) -> None:
     """Scatter stops colored by DBSCAN cluster; overlay polylines for routes."""
-    plt.figure(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(10, 8))
     labs = np.array(cluster_labels)
-    plt.scatter(
+    lons_all = [p[1] for p in stop_points]
+    lats_all = [p[0] for p in stop_points]
+    for poly in routes:
+        for p in poly:
+            lons_all.append(p[1])
+            lats_all.append(p[0])
+    xlim, ylim = pad_lonlat_extent(lons_all, lats_all, pad_deg=0.012)
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_aspect("equal", adjustable="box")
+    had_bm = try_osm_basemap(ax, viz_mode=viz_mode)
+    ax.scatter(
         [p[1] for p in stop_points],
         [p[0] for p in stop_points],
         c=labs,
@@ -161,52 +182,81 @@ def plot_clusters_and_routes(
         s=40,
         edgecolors="k",
         linewidths=0.3,
+        zorder=5,
     )
     for ri, poly in enumerate(routes):
         if len(poly) < 2:
             continue
         lons = [p[1] for p in poly]
         lats = [p[0] for p in poly]
-        plt.plot(lons, lats, "-o", linewidth=1.5, markersize=4, label=f"Route {ri+1}")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
+        ax.plot(lons, lats, "-o", linewidth=1.5, markersize=4, label=f"Route {ri+1}", zorder=5)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(title)
+    if not had_bm:
+        ax.grid(True, alpha=0.3)
     if routes:
-        plt.legend(loc="best", fontsize=8)
+        ax.legend(loc="best", fontsize=8)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)
-    plt.close()
+    plt.close(fig)
 
 
 def plot_before_after(
     naive_segments: list[tuple[tuple[float, float], tuple[float, float]]],
     optimized_routes: list[list[tuple[float, float]]],
     save_path: str | None = "output_before_after.png",
+    *,
+    viz_mode: str = "map",
 ) -> None:
     """
     Naive: many thin segments (direct out-and-back style).
     Optimized: longer continuous chains per driver.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    naive_lons: list[float] = []
+    naive_lats: list[float] = []
     for a, b in naive_segments:
-        axes[0].plot([a[1], b[1]], [a[0], b[0]], "r-", alpha=0.5, linewidth=1)
-        axes[0].scatter([a[1], b[1]], [a[0], b[0]], c="k", s=15)
+        for p in (a, b):
+            naive_lats.append(p[0])
+            naive_lons.append(p[1])
+    xlim0, ylim0 = pad_lonlat_extent(naive_lons, naive_lats, pad_deg=0.012)
+    axes[0].set_xlim(xlim0)
+    axes[0].set_ylim(ylim0)
+    axes[0].set_aspect("equal", adjustable="box")
+    had_bm0 = try_osm_basemap(axes[0], viz_mode=viz_mode)
+    for a, b in naive_segments:
+        axes[0].plot([a[1], b[1]], [a[0], b[0]], "r-", alpha=0.5, linewidth=1, zorder=5)
+        axes[0].scatter([a[1], b[1]], [a[0], b[0]], c="k", s=15, zorder=6)
     axes[0].set_title("Naive (independent legs)")
     axes[0].set_xlabel("Longitude")
     axes[0].set_ylabel("Latitude")
-    axes[0].grid(True, alpha=0.3)
+    if not had_bm0:
+        axes[0].grid(True, alpha=0.3)
 
+    opt_lons: list[float] = []
+    opt_lats: list[float] = []
+    for poly in optimized_routes:
+        for p in poly:
+            opt_lats.append(p[0])
+            opt_lons.append(p[1])
+    xlim1, ylim1 = pad_lonlat_extent(opt_lons, opt_lats, pad_deg=0.012)
+    axes[1].set_xlim(xlim1)
+    axes[1].set_ylim(ylim1)
+    axes[1].set_aspect("equal", adjustable="box")
+    had_bm1 = try_osm_basemap(axes[1], viz_mode=viz_mode)
     for poly in optimized_routes:
         if len(poly) < 2:
             continue
-        axes[1].plot([p[1] for p in poly], [p[0] for p in poly], "-o", linewidth=1.5, markersize=4)
+        axes[1].plot([p[1] for p in poly], [p[0] for p in poly], "-o", linewidth=1.5, markersize=4, zorder=5)
     axes[1].set_title("Optimized multi-stop routes")
     axes[1].set_xlabel("Longitude")
     axes[1].set_ylabel("Latitude")
-    axes[1].grid(True, alpha=0.3)
+    if not had_bm1:
+        axes[1].grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)
-    plt.close()
+    plt.close(fig)

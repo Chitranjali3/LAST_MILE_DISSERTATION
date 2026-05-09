@@ -5,3 +5,4 @@ scikit-learn>=1.3
 scipy>=1.11
 matplotlib>=3.7
 deap>=1.4
+contextily>=1.6.0

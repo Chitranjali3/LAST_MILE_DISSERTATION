@@ -1,0 +1,26 @@
+services:
+  osrm:
+    image: osrm/osrm-backend:latest
+    # Pin the platform: osrm-backend ships only linux/amd64. Stating it
+    # explicitly silences the platform-mismatch warning on Apple Silicon and
+    # lets Docker Desktop pick Rosetta when enabled (Settings -> General).
+    platform: linux/amd64
+    container_name: osrm-server
+    ports:
+      # Host port configurable (default 5001; macOS often uses 5000 for AirPlay).
+      - "${OSRM_HOST_PORT:-5001}:5000"
+    volumes:
+      - ./data:/data
+    # OSRM_MAP_STEM defaults to ``odisha`` (clipped from eastern-zone-latest).
+    # Override to point at any other built ``data/<stem>.osrm``.
+    command: osrm-routed --algorithm mld --ip 0.0.0.0 --port 5000 /data/${OSRM_MAP_STEM:-odisha}.osrm
+    restart: unless-stopped
+    healthcheck:
+      # /health is not implemented by osrm-routed; /nearest is and is cheap.
+      # Accept any 2xx with a successful curl exit code.
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O - http://localhost:5000/nearest/v1/driving/0,0 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+

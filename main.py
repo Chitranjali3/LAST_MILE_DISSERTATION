@@ -3,23 +3,30 @@
 Entry point: run the full optimization engine on synthetic inputs, emit
 research-friendly metrics, and save matplotlib figures (clusters & before/after).
 
+Synthetic orders/drivers default to an Odisha / Bhubaneswar region (``utils.ODISHA_REGION_CENTER``),
+aligned with the Geofabrik ``eastern-zone-latest`` OSRM extract.
+
 Visual walkthrough:
 
-    python main.py --present [--pause SECONDS]
+    python main.py --present [--pause SECONDS] [--viz-mode graph|map]
 
 Set Last-Mile_HEADLESS=1 to save step PNGs without blocking on windows (CI / SSH).
+CHITRA_VIZ_MODE=graph|map sets default for --viz-mode when omitted.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+
+from map_basemap import normalize_viz_mode
 
 from core.batching import merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
-from core.routing import run_optimized_routes, summarize_savings
+from core.routing import run_optimized_routes, select_route_polyline, summarize_savings
 from simulator import run_all as run_simulations
 from utils import (
     haversine_km,
@@ -77,17 +84,29 @@ def main() -> None:
         action="store_true",
         help="Open a click-based graphical input/process/output app backed by OSRM when available.",
     )
+    parser.add_argument(
+        "--viz-mode",
+        type=str,
+        choices=("graph", "map"),
+        default=normalize_viz_mode(os.environ.get("CHITRA_VIZ_MODE")),
+        help='Plots: "graph" = grid-only lon/lat; "map" = OSM tiles when possible (default from CHITRA_VIZ_MODE or map).',
+    )
     args = parser.parse_args()
 
     out_dir = Path(__file__).resolve().parent
     if args.visual_input:
         from visual_osrm_app import run_visual_osrm_app
 
-        run_visual_osrm_app(osrm_base_url=args.osrm_url, out_dir=out_dir)
+        run_visual_osrm_app(osrm_base_url=args.osrm_url, out_dir=out_dir, viz_mode=args.viz_mode)
         return
 
     orders = synthetic_orders(26, seed=42)
     drivers = synthetic_drivers(5, seed=42)
+
+    if args.use_osrm:
+        print(f"OSRM: requested at {args.osrm_url} (preflight pending...)")
+    else:
+        print("OSRM: not requested (pass --use-osrm to enable road enrichment)")
 
     if args.present:
         from visual_presenter import present_full_pipeline
@@ -100,6 +119,7 @@ def main() -> None:
             out_dir=out_dir,
             use_osrm=args.use_osrm,
             osrm_base_url=args.osrm_url,
+            viz_mode=args.viz_mode,
         )
     else:
         merged, _ = merge_same_location_orders(orders)
@@ -115,14 +135,21 @@ def main() -> None:
         )
         savings = summarize_savings(orders, drivers, results)
 
+    osrm_info = pipeline_info.get("osrm", {})
+    if args.use_osrm:
+        if osrm_info.get("connected"):
+            print(f"OSRM: connected (mode={osrm_info.get('mode', 'core_plus_osrm')})")
+        else:
+            reason = osrm_info.get("reason") or "unknown"
+            print(f"OSRM: not connected ({reason}), using core routing")
+
     sim_pack = run_simulations()
 
     routes_for_plot: list[list[tuple[float, float]]] = []
     dmap = {int(d["driver_id"]): d for d in drivers}
     for r in results:
         drv = dmap[r.driver_id]
-        poly = r.osrm_geometry if args.use_osrm and r.osrm_geometry else [tuple(drv["current_location"])] + r.drop_coords_ordered
-        routes_for_plot.append(poly)
+        routes_for_plot.append(select_route_polyline(r, tuple(drv["current_location"])))
 
     drops = [tuple(s["drop"]) for s in merged]
     plot_clusters_and_routes(
@@ -131,6 +158,7 @@ def main() -> None:
         routes_for_plot,
         title="DBSCAN clusters and optimized driver routes",
         save_path=str(out_dir / "output_clusters_routes.png"),
+        viz_mode=args.viz_mode,
     )
 
     naive_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
@@ -143,6 +171,7 @@ def main() -> None:
         naive_segments,
         routes_for_plot,
         save_path=str(out_dir / "output_before_after.png"),
+        viz_mode=args.viz_mode,
     )
 
     report = {
@@ -161,6 +190,10 @@ def main() -> None:
                 "osrm_road_km": r.osrm_road_km,
                 "osrm_duration_min": r.osrm_duration_min,
                 "osrm_status": r.osrm_status,
+                "effective_distance_km": r.effective_distance_km,
+                "effective_duration_min": r.effective_duration_min,
+                "effective_distance_source": r.effective_distance_source,
+                "effective_time_source": r.effective_time_source,
                 "dijkstra_equals_astar_legs": r.dijkstra_star_equal,
                 "vrptw_ok": r.vrptw_ok,
                 "vrptw": r.vrptw_detail,
@@ -184,6 +217,10 @@ def main() -> None:
 
     print(json.dumps(report, indent=2, default=str))
     print("\nFigures written:", out_dir / "output_clusters_routes.png", out_dir / "output_before_after.png")
+    if args.use_osrm:
+        enriched = osrm_info.get("enriched_routes", 0)
+        total = osrm_info.get("total_routes", len(results))
+        print(f"OSRM enriched routes: {enriched}/{total}")
     if args.present:
         slides = sorted(out_dir.glob("output_pipeline_*.png"))
         print(f"Presenter step frames: {len(slides)} files (output_pipeline_##_*.png)")

@@ -32,10 +32,48 @@ class OsrmRoute:
         return self.status == "ok" and self.road_km is not None
 
 
+@dataclass(frozen=True)
+class OsrmHealth:
+    """Outcome of a fast preflight reachability probe.
+
+    `reason` mirrors the per-route status taxonomy so callers can propagate
+    one consistent vocabulary all the way to JSON / CLI output.
+    """
+
+    ok: bool
+    reason: str  # "connected" | "unavailable" | "http_error" | "osrm_error"
+    detail: str | None = None
+
+
 class OsrmClient:
     def __init__(self, base_url: str = "http://localhost:5000", timeout_seconds: float = 4.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+
+    def health_check(self, *, timeout_seconds: float | None = None) -> OsrmHealth:
+        """Cheap reachability probe used as a preflight before issuing OSRM routes.
+
+        Tries `/nearest/v1/driving/<lon,lat>` against a single point because the
+        `/health` endpoint is not always exposed by every OSRM build, while the
+        nearest service is always available once `osrm-routed` is up. The probe
+        uses a tighter timeout than per-route calls so we fail fast on outages.
+        """
+        timeout = timeout_seconds if timeout_seconds is not None else min(self.timeout_seconds, 2.0)
+        url = f"{self.base_url}/nearest/v1/driving/0,0"
+        try:
+            with urlopen(url, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            return OsrmHealth(False, "http_error", f"HTTP {exc.code}")
+        except (TimeoutError, URLError, OSError, json.JSONDecodeError) as exc:
+            return OsrmHealth(False, "unavailable", str(exc))
+
+        code = str(payload.get("code", ""))
+        # OSRM responds with code "Ok" on success or "NoSegment" when the point
+        # is outside the loaded extract; both mean the server is reachable.
+        if code in {"Ok", "NoSegment"}:
+            return OsrmHealth(True, "connected", code)
+        return OsrmHealth(False, "osrm_error", _message(payload) or code or None)
 
     def route(self, points: list[LatLon]) -> OsrmRoute:
         """Route through the supplied lat,lon waypoints in order."""

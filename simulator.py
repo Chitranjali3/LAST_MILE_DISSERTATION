@@ -17,7 +17,7 @@ from typing import Any
 from core.batching import merge_same_location_orders
 from core.ga_optimizer import optimize_route_ga, tour_distance_km
 from core.routing import astar_tour_length, naive_independent_legs_km
-from utils import haversine_km, synthetic_drivers, synthetic_orders
+from utils import ODISHA_REGION_CENTER, haversine_km, synthetic_drivers, synthetic_orders
 
 
 def scenario_duplicate_building() -> dict[str, Any]:
@@ -42,7 +42,7 @@ def scenario_collinear_intermediate() -> dict[str, Any]:
     The GA should prefer a single chain A -> C -> B (order may permute) over
     separate excursions when measured in kilometers.
     """
-    center = (12.97, 77.59)
+    center = ODISHA_REGION_CENTER
     A = (center[0] + 0.02, center[1] + 0.00)
     C = (center[0] + 0.035, center[1] + 0.005)
     B = (center[0] + 0.05, center[1] + 0.01)

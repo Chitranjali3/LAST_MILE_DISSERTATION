@@ -4,7 +4,7 @@
 
 It now also integrates with a **local OSRM** (Open Source Routing Machine) server so the GA-chosen visit order can be evaluated as a real **road route** rather than a great-circle approximation, and it ships a **graphical click-based input → process → output app** so you can build inputs visually, watch the pipeline run, and see the optimized routes drawn on the map.
 
-The default entry point runs everything on **synthetic** orders and drivers centered on a Bangalore-like region (~12.97°N, 77.59°E).
+The default entry point runs everything on **synthetic** orders and drivers centered on an **Odisha / Bhubaneswar-like region** (~20.30°N, 85.82°E). The OSRM stack is built from a **bbox-clipped Odisha PBF** (carved out of Geofabrik's `eastern-zone-latest` extract via `osmium-tool`) so the road network covers the same area as the synthetic data with a tiny ~37 MB PBF and a sub-minute MLD build, even on Apple Silicon.
 
 ---
 
@@ -13,17 +13,18 @@ The default entry point runs everything on **synthetic** orders and drivers cent
 1. [What the pipeline does](#what-the-pipeline-does)
 2. [System architecture (with diagrams)](#system-architecture-with-diagrams)
 3. [OSRM integration](#osrm-integration)
-4. [Graphical input → process → output app](#graphical-input--process--output-app)
-5. [Repository layout](#repository-layout)
-6. [Requirements and installation](#requirements-and-installation)
-7. [How to run](#how-to-run)
-8. [Input data shape (orders and drivers)](#input-data-shape-orders-and-drivers)
-9. [End-to-end process (stage by stage)](#end-to-end-process-stage-by-stage)
-10. [How Last-Mile and OSRM work together](#how-Last-Mile-and-osrm-work-together)
-11. [Libraries: what each is for and where it appears](#libraries-what-each-is-for-and-where-it-appears)
-12. [Outputs](#outputs)
-13. [Default synthetic parameters](#default-synthetic-parameters-mainpy)
-14. [License / attribution](#license--attribution)
+4. [OSRM Optional Mode](#osrm-optional-mode)
+5. [Graphical input → process → output app](#graphical-input--process--output-app)
+6. [Repository layout](#repository-layout)
+7. [Requirements and installation](#requirements-and-installation)
+8. [How to run](#how-to-run)
+9. [Input data shape (orders and drivers)](#input-data-shape-orders-and-drivers)
+10. [End-to-end process (stage by stage)](#end-to-end-process-stage-by-stage)
+11. [How Last-Mile and OSRM work together](#how-Last-Mile-and-osrm-work-together)
+12. [Libraries: what each is for and where it appears](#libraries-what-each-is-for-and-where-it-appears)
+13. [Outputs](#outputs)
+14. [Default synthetic parameters](#default-synthetic-parameters-mainpy)
+15. [License / attribution](#license--attribution)
 
 ---
 
@@ -70,7 +71,7 @@ flowchart LR
 
     subgraph OSRM["OSRM stack (Docker)"]
         SRV["osrm-routed (port 5000)"]
-        DATA["data/india-latest.osrm.*<br/>MLD partition + cells"]
+        DATA["data/odisha.osrm.*<br/>MLD partition + cells<br/>(bbox-clipped from eastern-zone-latest)"]
     end
 
     CLI --> ROUTING
@@ -127,24 +128,35 @@ The `OSRM/` folder contains a turnkey Docker setup:
 
 | File | Role |
 |------|------|
-| `OSRM/docker-compose.yml` | Runs `osrm/osrm-backend:latest` with `osrm-routed --algorithm mld` on port `5000`, bound to `./data/india-latest.osrm`. Includes a `wget`-based healthcheck on `/health`. |
-| `OSRM/scripts/download_map.sh` | Idempotently downloads the India OSM extract (`india-latest.osm.pbf`) from Geofabrik (~500 MB) into `OSRM/data/`. |
-| `OSRM/scripts/build_osrm.sh` | Runs the **MLD pipeline**: `osrm-extract` → `osrm-partition` → `osrm-customize` to produce `india-latest.osrm`, `.partition`, `.cells`, `.mld`, etc. |
+| `OSRM/docker-compose.yml` | Runs `osrm/osrm-backend:latest` (pinned `platform: linux/amd64`) with `osrm-routed --algorithm mld` on container port `5000`, bound to `./data/odisha.osrm` by default. Override `OSRM_MAP_STEM` (e.g. `eastern-zone-latest`, `india-latest`) to point at any other built dataset. Healthchecked via `/health`. |
+| `OSRM/scripts/download_map.sh` | Idempotently downloads the source OSM extract from Geofabrik. When `OSRM_MAP_STEM=odisha` (the default) it fetches `eastern-zone-latest.osm.pbf` because Geofabrik does not publish a standalone Odisha extract. |
+| `OSRM/scripts/clip_to_bbox.sh` | Uses `osmium-tool` (native if installed, else the `iboates/osmium` Docker image) to clip a source PBF to a bounding box. Defaults clip `eastern-zone-latest.osm.pbf` → `odisha.osm.pbf` (~37 MB). Override `OSRM_BBOX`, `OSRM_SOURCE_STEM`, `OSRM_MAP_STEM` for other regions. |
+| `OSRM/scripts/build_osrm.sh` | Runs the **MLD pipeline** (`osrm-extract` → `osrm-partition` → `osrm-customize`) for `${OSRM_MAP_STEM:-odisha}`. If the chosen PBF is missing but a source PBF (`OSRM_SOURCE_STEM`) exists, it transparently invokes `clip_to_bbox.sh` first. |
 | `OSRM/scripts/run_server.sh` | Starts the container via `docker-compose up -d`, then polls `http://localhost:5000/health` until ready. |
 | `OSRM/scripts/stop_server.sh` | Brings the container down. |
-| `OSRM/tests/test_osrm_api.py` | Smoke tests the `/health`, `/route/v1`, `/table/v1`, `/nearest/v1` endpoints with Mumbai sample coordinates. |
+| `OSRM/tests/test_osrm_api.py` | Smoke tests the `/health`, `/route/v1`, `/table/v1`, `/nearest/v1` endpoints with Odisha (Bhubaneswar-area) sample coordinates. |
 
 ### One-time bring-up
 
 ```bash
 cd OSRM
-./scripts/download_map.sh
-./scripts/build_osrm.sh
-./scripts/run_server.sh
+./scripts/download_map.sh         # fetches eastern-zone-latest.osm.pbf (~242 MB)
+./scripts/clip_to_bbox.sh         # carves out odisha.osm.pbf (~37 MB) — needs osmium-tool (brew install osmium-tool) or Docker
+./scripts/build_osrm.sh           # extract + partition + customize on odisha.osm.pbf
+./scripts/run_server.sh           # boots osrm-routed on http://localhost:${OSRM_HOST_PORT:-5001}
 python tests/test_osrm_api.py     # optional smoke test
 ```
 
-The MLD build can take 10–30 minutes the first time. Once `osrm-routed` is healthy on port `5000`, Last-Mile will use it whenever you pass `--use-osrm`.
+`build_osrm.sh` will transparently call `clip_to_bbox.sh` if `data/odisha.osm.pbf` is missing but `data/eastern-zone-latest.osm.pbf` exists, so the explicit clip step is optional.
+
+The default flow downloads `eastern-zone-latest.osm.pbf` (~242 MB), clips it to an Odisha bounding box producing `odisha.osm.pbf` (~37 MB), then runs `osrm-extract`/`osrm-partition`/`osrm-customize` on the clipped file. End-to-end this finishes in **~1 minute** on Apple Silicon (vs an OOM crash on the full eastern-zone under x86 emulation). Once `osrm-routed` is healthy (Docker maps container port `5000` to host `${OSRM_HOST_PORT:-5001}`), Last-Mile will use it whenever you pass `--use-osrm` and point `--osrm-url` at that host port.
+
+To target a different region, set both env vars together, for example:
+
+```bash
+OSRM_MAP_STEM=goa OSRM_SOURCE_STEM=western-zone-latest \
+OSRM_BBOX=73.65,14.85,74.35,15.85 ./scripts/build_osrm.sh
+```
 
 ### Last-Mile's OSRM HTTP client — `core/osrm_client.py`
 
@@ -188,7 +200,12 @@ A few important details:
   "osrm": {
     "requested": true,
     "base_url": "http://localhost:5000",
-    "status_counts": { "ok": 7 }   // or { "unavailable: ...": 7 }
+    "connected": true,                 // result of the preflight probe
+    "mode": "core_plus_osrm",         // "core_only" | "core_plus_osrm"
+    "reason": "connected",            // "not_requested" | "connected" | "unavailable" | "http_error" | "osrm_error"
+    "status_counts": { "ok": 7 },     // per-route status histogram
+    "enriched_routes": 7,             // # routes that received OSRM road km/duration
+    "total_routes": 7
   }
 }
 ```
@@ -248,6 +265,144 @@ sequenceDiagram
     SRV-->>OC: { code:"Ok", routes:[{distance, duration, geometry}] }
     OC-->>ROUT: OsrmRoute(road_km, duration_min, geometry, "ok")
     ROUT-->>CLI: RouteResult with all metrics + JSON summary
+```
+
+---
+
+## OSRM Optional Mode
+
+OSRM is wired in as a **best-use enhancement layer**, never a hard dependency. Everything in `core/` — DBSCAN, nearest-driver assignment, GA sequencing, A\*/Dijkstra graph search, VRPTW feasibility — runs identically whether OSRM is installed, running, partially failing, or completely down.
+
+### What this mode does
+
+- **Preflights OSRM once per run.** Before the route loop, `run_optimized_routes` issues a fast `nearest/v1/driving` probe with a tight timeout. The result is cached on the pipeline summary (`pipeline.osrm.connected` + `pipeline.osrm.reason`).
+- **Enriches per route when reachable.** When the probe succeeds, the GA-chosen visit order for each cluster is also routed via OSRM to add `osrm_road_km`, `osrm_duration_min`, and a polyline `osrm_geometry` to the `RouteResult`.
+- **Surfaces an "effective metric" on every route.** Each `RouteResult` exposes four additive fields that pick the best-available source for downstream reports/plots:
+  - `effective_distance_km` — picked from OSRM → A\* → GA in that order.
+  - `effective_duration_min` — OSRM duration when present; otherwise distance ÷ 25 km/h proxy.
+  - `effective_distance_source` — `osrm` | `astar` | `ga_proxy`.
+  - `effective_time_source` — `osrm` | `proxy`.
+- **Reports coverage.** `pipeline.osrm.enriched_routes / total_routes` tells you how many routes got real road metrics, even on partial-failure runs.
+- **Prints status to the console.** See [example logs](#example-logs) below.
+
+### What this mode does NOT do
+
+- It does **not** change the GA, A\*, Dijkstra, VRPTW, or DBSCAN behavior. The visit order, driver assignment, and feasibility checks are identical with OSRM on or off.
+- It does **not** modify any existing JSON keys. Every new field (`pipeline.osrm.connected`, `pipeline.osrm.mode`, `pipeline.osrm.reason`, `pipeline.osrm.enriched_routes`, `pipeline.osrm.total_routes`, the four `effective_*` fields per route) is **additive**.
+- It does **not** retry or wait for OSRM. Preflight is a single short call; if it fails, the run uses core routing immediately.
+- It does **not** silently swallow OSRM problems. The reason is always recorded on `pipeline.osrm.reason` and `route.osrm_status`, and printed to stdout.
+
+### Fallback behavior
+
+| Situation | Behavior |
+|-----------|---------|
+| `--use-osrm` not passed | `mode=core_only`, `reason=not_requested`. Every route reports `osrm_status="not_requested"`. |
+| Server unreachable at startup (DNS/refused/timeout) | Preflight returns `unavailable`. **No** `/route/v1/driving` calls are issued at all (no per-route timeout penalty). `mode=core_only`, `reason=unavailable`. |
+| Server returns HTTP 5xx at startup | Preflight returns `http_error`. Same fallback as above with `reason=http_error`. |
+| Server is up but rejects a specific route (`code != "Ok"`, e.g. `NoRoute`) | That route gets `osrm_status="osrm_error: ..."`; the orchestrator **does not** disable OSRM for the rest of the run. |
+| Server crashes mid-run | First transport-level failure (`unavailable` / `http_error`) trips a one-way circuit breaker. Remaining routes inherit the same status without a network call. `mode` remains `core_plus_osrm` if at least one route was enriched, otherwise drops to `core_only`. |
+
+In all cases the route count is unchanged, every route gets effective distance/time numbers, and `pipeline.osrm` carries enough information to explain *why* OSRM did or did not contribute.
+
+### Example logs
+
+**`--use-osrm` off (default):**
+
+```text
+$ python main.py
+OSRM: not requested (pass --use-osrm to enable road enrichment)
+{ ...JSON report... }
+Figures written: .../output_clusters_routes.png .../output_before_after.png
+```
+
+`pipeline.osrm` block in the JSON:
+
+```jsonc
+"osrm": {
+  "requested": false,
+  "base_url": null,
+  "connected": false,
+  "mode": "core_only",
+  "reason": "not_requested",
+  "status_counts": { "not_requested": 7 },
+  "enriched_routes": 0,
+  "total_routes": 7
+}
+```
+
+**`--use-osrm` on, server **connected**:**
+
+```text
+$ python main.py --use-osrm --osrm-url http://localhost:5000
+OSRM: requested at http://localhost:5000 (preflight pending...)
+OSRM: connected (mode=core_plus_osrm)
+{ ...JSON report... }
+Figures written: .../output_clusters_routes.png .../output_before_after.png
+OSRM enriched routes: 7/7
+```
+
+`pipeline.osrm` block in the JSON:
+
+```jsonc
+"osrm": {
+  "requested": true,
+  "base_url": "http://localhost:5000",
+  "connected": true,
+  "mode": "core_plus_osrm",
+  "reason": "connected",
+  "status_counts": { "ok": 7 },
+  "enriched_routes": 7,
+  "total_routes": 7
+}
+```
+
+**`--use-osrm` on, server **not connected**:**
+
+```text
+$ python main.py --use-osrm --osrm-url http://localhost:5000
+OSRM: requested at http://localhost:5000 (preflight pending...)
+OSRM: not connected (unavailable), using core routing
+{ ...JSON report... }
+Figures written: .../output_clusters_routes.png .../output_before_after.png
+OSRM enriched routes: 0/7
+```
+
+`pipeline.osrm` block in the JSON:
+
+```jsonc
+"osrm": {
+  "requested": true,
+  "base_url": "http://localhost:5000",
+  "connected": false,
+  "mode": "core_only",
+  "reason": "unavailable",
+  "status_counts": { "unavailable: <urlopen error ...>": 7 },
+  "enriched_routes": 0,
+  "total_routes": 7
+}
+```
+
+**Mid-run failure (partial enrichment):** `pipeline.osrm.mode` stays `core_plus_osrm`, `pipeline.osrm.enriched_routes` < `total_routes`, and `status_counts` carries both `"ok"` and the failure reason key.
+
+### Visual surfacing
+
+- The `--present` slideshow's slide 6 ("Navigation · OSRM/A\* · VRPTW") prints `OSRM road geometry: connected (X/Y)` or `OSRM road geometry: not connected (reason)`. Slide 8's subtitle echoes the same.
+- The click-based `--visual-input` app shows a single-line OSRM status (`OSRM: connected (X/Y enriched)` / `OSRM: partial enrichment X/Y` / `OSRM: not connected (reason)`) both in its right-side info panel and as the figure subtitle of `output_osrm_visual_process.png`. Route polylines fall back to the straight-line `driver → ordered drops` chain whenever OSRM geometry is missing or a degenerate near-zero-length artifact.
+
+### Tests covering the optional behavior
+
+`tests/test_osrm_optional_behavior.py` runs offline (it stubs `OsrmClient.health_check` / `OsrmClient.route`) and exercises:
+
+- core-only with `--use-osrm` off,
+- full enrichment with `--use-osrm` on + healthy server,
+- immediate fallback with `--use-osrm` on + server down at start,
+- partial enrichment + circuit-breaker trip with `--use-osrm` on + mid-run failure,
+- the visual status label and the safe polyline selector.
+
+Run them with:
+
+```bash
+pytest tests/test_osrm_optional_behavior.py -v
 ```
 
 ---
@@ -314,7 +469,7 @@ The right-hand info panel always shows current mode, count of orders/drivers, th
 | `core/vrptw.py` | Forward-time feasibility: travel from Haversine/speed, service time, windows, capacity. |
 | `core/routing.py` | `run_optimized_routes`, `summarize_savings`, `astar_tour_length`, `RouteResult` (now with OSRM fields). |
 | `core/osrm_client.py` | `OsrmClient` + `OsrmRoute`: stdlib HTTP client for OSRM `/route/v1/driving`. |
-| `utils.py` | Haversine, synthetic data generators, plotting helpers. |
+| `utils.py` | Haversine, `ODISHA_REGION_CENTER`, synthetic data generators, plotting helpers. |
 | `simulator.py` | Small scripted scenarios (`run_all`): duplicate drops, collinear tour, insertion waves. |
 | `visual_presenter.py` | Step-by-step Matplotlib walkthrough (`present_full_pipeline`); slide 06 mentions OSRM, slide 08 adds an OSRM bar when totals are present. |
 | `visual_osrm_app.py` | Click-based graphical input → process → output app with optional OSRM road geometry. |
@@ -646,19 +801,19 @@ With `--visual-input`:
 **Stdout**: indented JSON (`json.dumps(..., indent=2, default=str)`) including:
 
 - `clustered_deliveries` — number of merged stops, cluster labels, cluster→driver map
-- `optimized_routes` — per-cluster `RouteResult` rows; with `--use-osrm` each row carries `osrm_road_km`, `osrm_duration_min`, `osrm_status`
+- `optimized_routes` — per-cluster `RouteResult` rows; every row carries `osrm_road_km`, `osrm_duration_min`, `osrm_status`, plus the additive M2 fields `effective_distance_km`, `effective_duration_min`, `effective_distance_source` (`osrm` | `astar` | `ga_proxy`), and `effective_time_source` (`osrm` | `proxy`)
 - `totals` — `naive_sum_legs_km`, `optimized_ga_open_tour_km`, `optimized_astar_graph_km`, `optimized_osrm_road_km`, `saved_km_vs_naive_*`
 - `delivery_grouping` — representative + merged order ids per stop
 - `comparison_naive_vs_optimized` — flat side-by-side numbers including OSRM
 - `simulations` — `simulator.run_all()` block
-- `pipeline` — merge map + `pipeline.osrm.{requested, base_url, status_counts}`
+- `pipeline` — merge map + `pipeline.osrm.{requested, base_url, connected, mode, reason, status_counts, enriched_routes, total_routes}` (see [OSRM Optional Mode](#osrm-optional-mode))
 
 ---
 
 ## Default synthetic parameters (`main.py`)
 
-- **Orders**: `synthetic_orders(26, seed=42)`
-- **Drivers**: `synthetic_drivers(5, seed=42)`
+- **Orders**: `synthetic_orders(26, seed=42)` (default spread around **Bhubaneswar, Odisha** — see `utils.ODISHA_REGION_CENTER`)
+- **Drivers**: `synthetic_drivers(5, seed=42)` (same region)
 - **DBSCAN** `eps_km`: **1.4**
 - **OSRM**: off by default; pass `--use-osrm` to enable.
 - **OSRM URL**: `http://localhost:5000` by default; override with `--osrm-url`.

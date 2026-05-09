@@ -23,6 +23,12 @@ from core.vrptw import VRPTWConfig, slack_time_windows, validate_route_feasibili
 from utils import haversine_km
 
 
+# Average city driving speed (km/h) used as a fallback when OSRM duration is
+# unavailable. Matches the proxy speed assumed inside the GA optimizer so the
+# reported "effective_duration_min" stays consistent with the planning math.
+_DEFAULT_FALLBACK_SPEED_KMH = 25.0
+
+
 @dataclass
 class RouteResult:
     cluster_id: int
@@ -39,6 +45,69 @@ class RouteResult:
     osrm_duration_min: float | None = None
     osrm_geometry: list[tuple[float, float]] | None = None
     osrm_status: str = "not_requested"
+    # Additive M2 fields: a single source of truth for "what should I report or
+    # plot for this route?". Existing OSRM/A*/GA fields are untouched, callers
+    # that only want the best-available metric can read these directly.
+    effective_distance_km: float = 0.0
+    effective_duration_min: float | None = None
+    effective_distance_source: str = "astar"  # "osrm" | "astar" | "ga_proxy"
+    effective_time_source: str = "proxy"  # "osrm" | "proxy"
+
+
+def select_route_polyline(
+    result: "RouteResult",
+    driver_start: tuple[float, float],
+) -> list[tuple[float, float]]:
+    """Pick a safe drawable polyline for `result`, deterministically.
+
+    Order of preference (M2 plotting rule):
+      1. OSRM road geometry, when it exists, has at least two points, and is
+         not a degenerate near-zero-length artifact (which OSRM occasionally
+         emits when waypoints snap to the same edge).
+      2. The straight-line "driver_start -> ordered drops" fallback, which is
+         always available because A*/GA already validated the stops.
+    """
+    fallback = [driver_start] + result.drop_coords_ordered
+    osrm_poly = result.osrm_geometry or []
+    if len(osrm_poly) < 2:
+        return fallback
+
+    start_lat, start_lon = osrm_poly[0]
+    end_lat, end_lon = osrm_poly[-1]
+    if abs(start_lat - end_lat) < 1e-6 and abs(start_lon - end_lon) < 1e-6:
+        return fallback
+    return osrm_poly
+
+
+def _effective_metrics_for_route(
+    *,
+    osrm_road_km: float | None,
+    osrm_duration_min: float | None,
+    astar_leg_km: float,
+    ga_tour_km: float,
+) -> tuple[float, float | None, str, str]:
+    """Pick the best-available distance/duration source for a single route.
+
+    Fallback priority (per checklist M2):
+      1. OSRM road metrics when a numeric value is present.
+      2. A* graph metrics fallback (always computed).
+      3. GA fallback for geometry-only edge cases (zero-length A* result).
+    """
+    if osrm_road_km is not None and osrm_road_km > 0.0:
+        dist = float(osrm_road_km)
+        dist_source = "osrm"
+    elif astar_leg_km > 0.0:
+        dist = float(astar_leg_km)
+        dist_source = "astar"
+    else:
+        dist = float(ga_tour_km)
+        dist_source = "ga_proxy"
+
+    if osrm_duration_min is not None and osrm_duration_min > 0.0:
+        return dist, float(osrm_duration_min), dist_source, "osrm"
+
+    proxy_minutes = (dist / _DEFAULT_FALLBACK_SPEED_KMH) * 60.0 if dist > 0.0 else 0.0
+    return dist, proxy_minutes, dist_source, "proxy"
 
 
 def _driver_by_id(drivers: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -104,6 +173,11 @@ def run_optimized_routes(
     Execute the full optimization stack on synthetic/real dict inputs.
 
     Returns per-cluster `RouteResult` rows and a summary dictionary.
+
+    OSRM is treated as an *optional enrichment layer*: even when `use_osrm=True`
+    the core flow always completes with GA + A* + VRPTW metrics. A fast preflight
+    decides whether OSRM gets invoked at all and the per-route circuit breaker
+    short-circuits remaining calls if the server collapses mid-run.
     """
     merged, merge_map = merge_same_location_orders(orders)
     if slack_windows:
@@ -114,11 +188,27 @@ def run_optimized_routes(
     clusters = stops_by_cluster(labels)
     assignment = assign_nearest_driver(clusters, merged, drivers)
     dmap = _driver_by_id(drivers)
-    osrm_client = OsrmClient(osrm_base_url) if use_osrm else None
+
+    # M1: preflight gate. Build the client only when requested, then probe before
+    # the route loop. A failing probe immediately drops us into "core_only" mode
+    # so no per-cluster OSRM call is ever attempted.
+    osrm_client: OsrmClient | None = None
+    osrm_connected = False
+    osrm_reason = "not_requested"
+    osrm_disabled_status: str | None = None
+    if use_osrm:
+        osrm_client = OsrmClient(osrm_base_url)
+        health = osrm_client.health_check()
+        osrm_connected = health.ok
+        osrm_reason = health.reason
+        if not health.ok:
+            detail = f": {health.detail}" if health.detail else ""
+            osrm_disabled_status = f"{health.reason}{detail}"
+            osrm_client = None  # core_only path: never issue route calls
 
     results: list[RouteResult] = []
     osrm_status_counts: dict[str, int] = {}
-    osrm_disabled_status: str | None = None
+    enriched_routes = 0
 
     for cid, idxs in sorted(clusters.items()):
         d_id = int(assignment.get(cid, drivers[0]["driver_id"]))
@@ -143,19 +233,36 @@ def run_optimized_routes(
         osrm_road_km: float | None = None
         osrm_duration_min: float | None = None
         osrm_geometry: list[tuple[float, float]] | None = None
-        osrm_status = "not_requested"
-        if osrm_client is not None:
-            if osrm_disabled_status is not None:
-                osrm_status = osrm_disabled_status
+        if not use_osrm:
+            osrm_status = "not_requested"
+        elif osrm_client is None:
+            # Either preflight failed or a previous route tripped the breaker.
+            osrm_status = osrm_disabled_status or osrm_reason
+        else:
+            osrm_route = osrm_client.route([tuple(drv["current_location"])] + ordered_drops)
+            osrm_road_km = osrm_route.road_km
+            osrm_duration_min = osrm_route.duration_min
+            osrm_geometry = osrm_route.geometry
+            if osrm_route.ok:
+                osrm_status = "ok"
+                enriched_routes += 1
             else:
-                osrm_route = osrm_client.route([tuple(drv["current_location"])] + ordered_drops)
-                osrm_road_km = osrm_route.road_km
-                osrm_duration_min = osrm_route.duration_min
-                osrm_geometry = osrm_route.geometry
-                osrm_status = osrm_route.status if osrm_route.ok else f"{osrm_route.status}: {osrm_route.message or osrm_route.code}"
-                if osrm_route.status in {"unavailable", "http_error"}:
-                    osrm_disabled_status = osrm_status
+                detail_txt = osrm_route.message or osrm_route.code
+                osrm_status = f"{osrm_route.status}: {detail_txt}" if detail_txt else osrm_route.status
+            # M5: one-way circuit breaker — any transport-level failure stops
+            # further OSRM calls and propagates the reason cleanly to remaining
+            # clusters via osrm_disabled_status.
+            if osrm_route.status in {"unavailable", "http_error"}:
+                osrm_disabled_status = osrm_status
+                osrm_client = None
         osrm_status_counts[osrm_status] = osrm_status_counts.get(osrm_status, 0) + 1
+
+        eff_km, eff_min, eff_dist_src, eff_time_src = _effective_metrics_for_route(
+            osrm_road_km=osrm_road_km,
+            osrm_duration_min=osrm_duration_min,
+            astar_leg_km=ast_km,
+            ga_tour_km=ga_km,
+        )
 
         results.append(
             RouteResult(
@@ -173,8 +280,20 @@ def run_optimized_routes(
                 osrm_duration_min=osrm_duration_min,
                 osrm_geometry=osrm_geometry,
                 osrm_status=osrm_status,
+                effective_distance_km=eff_km,
+                effective_duration_min=eff_min,
+                effective_distance_source=eff_dist_src,
+                effective_time_source=eff_time_src,
             )
         )
+
+    total_routes = len(results)
+    if not use_osrm:
+        mode = "core_only"
+    elif enriched_routes > 0 and osrm_connected:
+        mode = "core_plus_osrm"
+    else:
+        mode = "core_only"
 
     summary = {
         "merged_stop_count": len(merged),
@@ -183,7 +302,12 @@ def run_optimized_routes(
         "osrm": {
             "requested": use_osrm,
             "base_url": osrm_base_url if use_osrm else None,
+            "connected": bool(osrm_connected and use_osrm),
+            "mode": mode,
+            "reason": osrm_reason,
             "status_counts": osrm_status_counts,
+            "enriched_routes": enriched_routes,
+            "total_routes": total_routes,
         },
     }
     return results, summary

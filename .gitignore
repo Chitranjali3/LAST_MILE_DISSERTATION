@@ -1,26 +1,27 @@
+# OS-specific files
+.DS_Store
+
+# Python cache and bytecode
 __pycache__/
 *.py[cod]
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
 
-.venv/
-venv/
-env/
-ENV/
-
-.DS_Store
-Thumbs.db
-
-.idea/
+# IDE/editor
 .vscode/
-OSRM/
+.idea/
+
+# Local outputs/artifacts
+output_*.png
+
+# OSRM local data/config folder
+OSRM/data/
