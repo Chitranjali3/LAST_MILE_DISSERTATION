@@ -478,6 +478,7 @@ def present_full_pipeline(
     use_osrm: bool = False,
     osrm_base_url: str = "http://localhost:5000",
     viz_mode: str = "map",
+    use_vrptw: bool = False,
 ) -> tuple[list[RouteResult], dict[str, float], list[dict[str, Any]], np.ndarray, dict[int, int], dict[str, Any]]:
     """Run slideshow + optimization once; returns (results, savings, merged, labels, assignment, grouping meta)."""
     cfg = PresenterConfig(
@@ -504,6 +505,7 @@ def present_full_pipeline(
         dbscan_eps_km=dbscan_eps_km,
         use_osrm=use_osrm,
         osrm_base_url=osrm_base_url,
+        use_vrptw=use_vrptw,
     )
     savings = summarize_savings(orders, drivers, results)
     multi = sum(1 for _c, idxs in clusters.items() if len(idxs) > 1)

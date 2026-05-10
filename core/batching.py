@@ -134,17 +134,31 @@ def merge_same_location_orders(
             tw_lo = min(float(x["time_window"][0]) for x in group)
             tw_hi = max(float(x["time_window"][1]) for x in group)
         total_w = sum(float(x["parcel_weight"]) for x in group)
-        merged.append(
-            {
-                "order_id": int(rep["order_id"]),
-                "merged_order_ids": [int(x["order_id"]) for x in group],
-                "user_ids": [int(x["user_id"]) for x in group],
-                "pickup": tuple(rep["pickup"]),
-                "drop": tuple(rep["drop"]),
-                "time_window": [tw_lo, tw_hi],
-                "parcel_weight": total_w,
-            }
-        )
+        # Preserve preferred_minute when the user (or sample loader) annotated
+        # any order in the group with one. We use the representative order's
+        # value if available, else the earliest non-null preferred time across
+        # the group.
+        prefs = [float(x["preferred_minute"]) for x in group if x.get("preferred_minute") is not None]
+        rep_pref = rep.get("preferred_minute")
+        merged_pref: float | None
+        if rep_pref is not None:
+            merged_pref = float(rep_pref)
+        elif prefs:
+            merged_pref = min(prefs)
+        else:
+            merged_pref = None
+        row = {
+            "order_id": int(rep["order_id"]),
+            "merged_order_ids": [int(x["order_id"]) for x in group],
+            "user_ids": [int(x["user_id"]) for x in group],
+            "pickup": tuple(rep["pickup"]),
+            "drop": tuple(rep["drop"]),
+            "time_window": [tw_lo, tw_hi],
+            "parcel_weight": total_w,
+        }
+        if merged_pref is not None:
+            row["preferred_minute"] = merged_pref
+        merged.append(row)
         for x in group:
             order_to_rep[int(x["order_id"])] = int(rep["order_id"])
 

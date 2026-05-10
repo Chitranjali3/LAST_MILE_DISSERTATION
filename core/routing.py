@@ -18,7 +18,7 @@ from typing import Any
 from core.batching import greedy_dynamic_batch, merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
-from core.ga_optimizer import optimize_route_ga, tour_distance_km
+from core.ga_optimizer import optimize_route_ga, optimize_route_ga_vrptw, tour_distance_km
 from core.graph_search import astar_fastest_path, build_geographic_graph, dijkstra_shortest_path
 from core.osrm_client import OsrmClient
 from core.vrptw import VRPTWConfig, slack_time_windows, validate_route_feasibility
@@ -57,6 +57,10 @@ class RouteResult:
     effective_duration_min: float | None = None
     effective_distance_source: str = "dijkstra"  # "osrm" | "dijkstra" | "ga_proxy"
     effective_time_source: str = "proxy"  # "osrm" | "proxy"
+    # VRPTW mode: when run_optimized_routes was called with use_vrptw=True, the
+    # GA was time-window-aware. These fields surface that intent in reports.
+    vrptw_optimized: bool = False
+    preferred_minute_ordered: list[float | None] | None = None
 
 
 def select_route_polyline(
@@ -206,6 +210,7 @@ def run_optimized_routes(
     slack_windows: bool = True,
     use_osrm: bool = False,
     osrm_base_url: str = "http://localhost:5000",
+    use_vrptw: bool = False,
 ) -> tuple[list[RouteResult], dict[str, Any]]:
     """
     Execute the full optimization stack on synthetic/real dict inputs.
@@ -216,9 +221,17 @@ def run_optimized_routes(
     the core flow always completes with GA + Dijkstra/A* graph legs + VRPTW metrics. A fast preflight
     decides whether OSRM gets invoked at all and the per-route circuit breaker
     short-circuits remaining calls if the server collapses mid-run.
+
+    When ``use_vrptw=True`` the GA stop-sequencer becomes time-window aware:
+    each cluster is sequenced with ``optimize_route_ga_vrptw`` so the visit
+    order respects per-order delivery windows even when an earlier-window stop
+    is geographically farther from the driver. With ``use_vrptw=False`` the GA
+    keeps its original distance-only objective and time windows are checked
+    only post-hoc by ``validate_route_feasibility``.
     """
     merged, merge_map = merge_same_location_orders(orders)
-    if slack_windows:
+    # In VRPTW mode the windows are the user's intent — don't widen them.
+    if slack_windows and not use_vrptw:
         slack_time_windows(merged, pad_min=45.0)
 
     _ = greedy_dynamic_batch(orders)  # greedy wave partitioning (dynamic insertion semantics)
@@ -252,7 +265,21 @@ def run_optimized_routes(
         d_id = int(assignment.get(cid, drivers[0]["driver_id"]))
         drv = dmap[d_id]
         cluster_coords = [tuple(merged[i]["drop"]) for i in idxs]
-        perm, _ga_fit = optimize_route_ga(cluster_coords, tuple(drv["current_location"]))
+        if use_vrptw:
+            cluster_windows = [
+                (
+                    float(merged[i]["time_window"][0]),
+                    float(merged[i]["time_window"][1]),
+                )
+                for i in idxs
+            ]
+            perm, _ga_fit = optimize_route_ga_vrptw(
+                cluster_coords,
+                tuple(drv["current_location"]),
+                cluster_windows,
+            )
+        else:
+            perm, _ga_fit = optimize_route_ga(cluster_coords, tuple(drv["current_location"]))
         ordered_drops = [cluster_coords[k] for k in perm]
         metas = [merged[idxs[k]] for k in perm]
 
@@ -306,6 +333,11 @@ def run_optimized_routes(
             ga_tour_km=ga_km,
         )
 
+        preferred_ordered: list[float | None] = [
+            (float(m["preferred_minute"]) if m.get("preferred_minute") is not None else None)
+            for m in metas
+        ]
+
         results.append(
             RouteResult(
                 cluster_id=cid,
@@ -329,6 +361,8 @@ def run_optimized_routes(
                 effective_duration_min=eff_min,
                 effective_distance_source=eff_dist_src,
                 effective_time_source=eff_time_src,
+                vrptw_optimized=use_vrptw,
+                preferred_minute_ordered=preferred_ordered,
             )
         )
 
@@ -352,6 +386,11 @@ def run_optimized_routes(
             "reason": osrm_reason,
             "status_counts": osrm_status_counts,
             "enriched_routes": enriched_routes,
+            "total_routes": total_routes,
+        },
+        "vrptw": {
+            "enabled": bool(use_vrptw),
+            "feasible_routes": sum(1 for r in results if r.vrptw_ok),
             "total_routes": total_routes,
         },
     }

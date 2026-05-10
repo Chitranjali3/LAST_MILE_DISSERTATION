@@ -85,6 +85,15 @@ def main() -> None:
         help="Open a click-based graphical input/process/output app backed by OSRM when available.",
     )
     parser.add_argument(
+        "--use-vrptw",
+        action="store_true",
+        help=(
+            "Enable time-window-aware GA so the visit order respects each order's preferred "
+            "delivery time (driver visits the earlier-windowed customer first even when a later "
+            "one is geographically closer). Off by default — system runs as before."
+        ),
+    )
+    parser.add_argument(
         "--viz-mode",
         type=str,
         choices=("graph", "map"),
@@ -97,7 +106,12 @@ def main() -> None:
     if args.visual_input:
         from visual_osrm_app import run_visual_osrm_app
 
-        run_visual_osrm_app(osrm_base_url=args.osrm_url, out_dir=out_dir, viz_mode=args.viz_mode)
+        run_visual_osrm_app(
+            osrm_base_url=args.osrm_url,
+            out_dir=out_dir,
+            viz_mode=args.viz_mode,
+            initial_use_vrptw=args.use_vrptw,
+        )
         return
 
     orders = synthetic_orders(26, seed=42)
@@ -120,6 +134,7 @@ def main() -> None:
             use_osrm=args.use_osrm,
             osrm_base_url=args.osrm_url,
             viz_mode=args.viz_mode,
+            use_vrptw=args.use_vrptw,
         )
     else:
         merged, _ = merge_same_location_orders(orders)
@@ -132,6 +147,7 @@ def main() -> None:
             dbscan_eps_km=1.4,
             use_osrm=args.use_osrm,
             osrm_base_url=args.osrm_url,
+            use_vrptw=args.use_vrptw,
         )
         savings = summarize_savings(orders, drivers, results)
 
