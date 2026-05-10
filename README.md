@@ -1,31 +1,64 @@
-# Last-Mile
+# Last-Mile (Chitra)
 
-**Last-Mile** is a Python research/demo pipeline for **last-mile delivery optimization**. It stitches together **spatial batching and clustering**, **nearest-driver assignment**, a **genetic algorithm (GA)** for stop order inside each cluster, **graph shortest paths** (Dijkstra vs A\*), **VRPTW feasibility checks**, and **matplotlib** visualizations plus a structured **JSON** report.
+**Last-Mile** is a Python research/demo pipeline for **last-mile delivery optimization**. This repository is often worked on under the **Chitra** project folder name; the product behavior described here is the same.
 
-It now also integrates with a **local OSRM** (Open Source Routing Machine) server so the GA-chosen visit order can be evaluated as a real **road route** rather than a great-circle approximation, and it ships a **graphical click-based input → process → output app** so you can build inputs visually, watch the pipeline run, and see the optimized routes drawn on the map.
+In everyday terms: imagine many parcels must be dropped at different map locations, several drivers are available, and each customer cares about *when* the parcel arrives and how heavy it is. This program **groups nearby drops**, **picks which driver serves which group**, **decides the order of stops** to reduce driving, **checks** that times and truck capacity still work, and optionally asks a **real road router** (OSRM) how far and long the drive would actually be. Everything is **saved** as **CSV** and **JSON** so you can open results in Excel or downstream tools, and figures go under **`output/images/`** with matching timestamps.
 
-The default entry point runs everything on **synthetic** orders and drivers centered on an **Odisha / Bhubaneswar-like region** (~20.30°N, 85.82°E). The OSRM stack is built from a **bbox-clipped Odisha PBF** (carved out of Geofabrik's `eastern-zone-latest` extract via `osmium-tool`) so the road network covers the same area as the synthetic data with a tiny ~37 MB PBF and a sub-minute MLD build, even on Apple Silicon.
+Technically it stitches together **spatial batching and clustering**, **nearest-driver assignment**, a **genetic algorithm (GA)** for stop order inside each cluster (distance-only by default, or **time-window-aware** with `--use-vrptw`), **graph shortest paths** (Dijkstra as the authoritative graph km; A\* for fastest-time-style legs on the same graph), **VRPTW validation** (and optional GA that respects windows), **matplotlib** maps (with optional **OpenStreetMap** tiles), plus structured **JSON** and flat **CSV** exports.
+
+It integrates with a **local OSRM** (Open Source Routing Machine) server so the GA-chosen visit order can be evaluated as a real **road route**, and ships a **graphical click-based input → process → output app**.
+
+The default entry point runs on **synthetic** orders and drivers centered on an **Odisha / Bhubaneswar-like region** (~20.30°N, 85.82°E). The OSRM stack uses a **bbox-clipped Odisha PBF** (from Geofabrik's `eastern-zone-latest` via `osmium-tool`) so the road network matches the demo area with a small ~37 MB PBF and a quick MLD build, including on Apple Silicon.
 
 ---
 
 ## Table of contents
 
-1. [What the pipeline does](#what-the-pipeline-does)
-2. [System architecture (with diagrams)](#system-architecture-with-diagrams)
-3. [OSRM integration](#osrm-integration)
-4. [OSRM Optional Mode](#osrm-optional-mode)
-5. [Graphical input → process → output app](#graphical-input--process--output-app)
-6. [Repository layout](#repository-layout)
-7. [Requirements and installation](#requirements-and-installation)
-8. [How to run](#how-to-run)
-9. [Input data shape (orders and drivers)](#input-data-shape-orders-and-drivers)
-10. [End-to-end process (stage by stage)](#end-to-end-process-stage-by-stage)
-11. [How Last-Mile and OSRM work together](#how-Last-Mile-and-osrm-work-together)
-12. [Libraries: what each is for and where it appears](#libraries-what-each-is-for-and-where-it-appears)
-13. [Outputs](#outputs)
-14. [Default synthetic parameters](#default-synthetic-parameters-mainpy)
-15. [Future upgrades](#future-upgrades)
-16. [License / attribution](#license--attribution)
+1. [Plain-language guide (start here)](#plain-language-guide-start-here)
+2. [What the pipeline does](#what-the-pipeline-does)
+3. [Every file and module (what it does and why)](#every-file-and-module-what-it-does-and-why)
+4. [Algorithms in one place](#algorithms-in-one-place)
+5. [CSV and JSON: loading data and saving results](#csv-and-json-loading-data-and-saving-results)
+6. [VRPTW: two roles (check vs optimize)](#vrptw-two-roles-check-vs-optimize)
+7. [System architecture (with diagrams)](#system-architecture-with-diagrams)
+8. [OSRM integration](#osrm-integration)
+9. [OSRM Optional Mode](#osrm-optional-mode)
+10. [Graphical input → process → output app](#graphical-input--process--output-app)
+11. [Repository layout](#repository-layout)
+12. [Requirements and installation](#requirements-and-installation)
+13. [How to run](#how-to-run)
+14. [Input data shape (orders and drivers)](#input-data-shape-orders-and-drivers)
+15. [End-to-end process (stage by stage)](#end-to-end-process-stage-by-stage)
+16. [How Last-Mile and OSRM work together](#how-Last-Mile-and-osrm-work-together)
+17. [Libraries: what each is for and where it appears](#libraries-what-each-is-for-and-where-it-appears)
+18. [Outputs](#outputs)
+19. [Default synthetic parameters](#default-synthetic-parameters-mainpy)
+20. [Future upgrades](#future-upgrades)
+21. [License / attribution](#license--attribution)
+
+---
+
+## Plain-language guide (start here)
+
+**The story.** Delivery companies waste fuel when drivers zig-zag. This code is a *research prototype* that mimics a small piece of a real dispatch system: group stops that are close, assign a driver, reorder stops intelligently, then double-check constraints (time windows, capacity) and optionally measure true road distance.
+
+**Inputs you can use.**
+
+- **Synthetic data** (built-in random-ish orders near Bhubaneswar).
+- **CSV files** for real or sample tabular data (`data/sample_orders.csv`, `data/sample_drivers.csv`, and `sample_orders_vrptw.csv` for strict time preferences).
+
+**Outputs you get.**
+
+- **Printed JSON** on the terminal (full report for the run).
+- **A JSON file** under `output/json/pipeline_run_<UTC_stamp>.json` (same content, easy to archive).
+- **A CSV file** under `output/csv/pipeline_run_<UTC_stamp>.csv` — one row per optimized route, with the same timestamp as the JSON so they pair up.
+- **PNG maps** under `output/images/` (cluster view, before/after comparison, and presenter or visual-app frames when you use those modes).
+
+**Optional extras.**
+
+- **`--use-osrm`**: ask a local road engine for real driving distance, time, and map polylines. If the server is off, the run still finishes using straight-line and graph estimates.
+- **`--use-vrptw`**: make the genetic optimizer *care* about delivery time windows when choosing order (default mode only checks windows *after* ordering).
+- **`--viz-mode map`**: draw OpenStreetMap tiles under your data when **contextily** can fetch tiles (disable with `CHITRA_NO_BASEMAP=1` for offline/tests).
 
 ---
 
@@ -34,17 +67,111 @@ The default entry point runs everything on **synthetic** orders and drivers cent
 At a high level:
 
 1. **Merge** orders that share the same drop coordinate (within rounded lat/lon).
-2. Optionally **slack** time windows to ease feasibility after merges.
+2. Optionally **slack** time windows to ease feasibility after merges (**skipped** when `--use-vrptw` is on so your windows stay exact).
 3. **Cluster** merged stops with **DBSCAN** in geographic space (Haversine metric).
 4. **Assign** each cluster to the **nearest** driver by Haversine centroid-to-driver distance.
-5. For each cluster, **optimize visit order** with a **GA** (permutation-encoded open tour from the assigned driver).
-6. **Evaluate** chained route length on a **k-NN geographic graph** using **A\*** per leg (and benchmark **Dijkstra** vs A\* distances).
+5. For each cluster, **optimize visit order** with a **GA** (permutation-encoded open tour from the assigned driver). With **`--use-vrptw`**, the GA uses **`optimize_route_ga_vrptw`** (penalizes lateness); otherwise **`optimize_route_ga`** minimizes distance-like fitness only.
+6. **Evaluate** chained route length on a **k-NN geographic graph** using **Dijkstra** per leg for summed graph km, and **A\*** per leg for fastest-time-style legs and ETAs (**legs are compared** so you can see Dijkstra vs A\* agreement).
 7. **Optionally evaluate the same ordered route on the real road network via OSRM** to obtain road km, driving duration, and a polyline geometry to plot.
-8. **Validate** the proposed sequence with a lightweight **VRPTW** simulator (capacity, windows, duration).
+8. **Validate** the proposed sequence with a lightweight **VRPTW** forward simulator (capacity, windows, service time, max tour length).
 9. Emit **comparison metrics** versus a naive baseline (each stop served independently by its closest driver).
-10. **Plot** clusters/routes and naive vs optimized geometry; optional **slideshow** presenter or **graphical click-input app**.
+10. **Write CSV + JSON** artifacts and **plot** clusters/routes and naive vs optimized geometry; optional **slideshow** presenter or **graphical click-input app**.
 
 Greedy dynamic batching is also computed (from raw orders) to illustrate streaming-style wave partitioning; the main routing pipeline in `run_optimized_routes` calls it mainly for methodological alignment (see `core/routing.py`).
+
+---
+
+## Every file and module (what it does and why)
+
+| Module | Plain explanation | Why it exists |
+|--------|-------------------|---------------|
+| **`main.py`** | Command-line front door: parses flags, loads synthetic or **CSV** data, runs the pipeline or visual apps, writes **CSV/JSON/PNGs**, prints JSON. | One place to run experiments without writing Python scripts. |
+| **`pipeline_csv_log.py`** | Builds the **JSON report** dict, writes **pretty JSON** files, and flattens per-route metrics into a **CSV** with stable columns (`FIELDNAMES`). Also defines `output/csv`, `output/json`, `output/images` helpers and UTC run stamps. | Analysts and BI tools prefer CSV; developers prefer JSON; both stay **in sync** per run. |
+| **`utils.py`** | Earth-distance (**Haversine**), region center, **synthetic** order/driver factories, **`load_orders_csv` / `load_drivers_csv`**, and **matplotlib** plots (`plot_clusters_and_routes`, `plot_before_after`) delegated to **map_basemap** for tiles. | Centralizes geography math and shared plotting; CSV loaders enforce strict headers so bad files fail fast. |
+| **`map_basemap.py`** | Chooses **`graph`** (grid only) vs **`map`** (OSM tiles via **contextily**). Reads **`CHITRA_VIZ_MODE`** and **`CHITRA_NO_BASEMAP`**. | Makes maps readable for non-experts (satellite-like context) without forcing a heavy dependency path when tiles fail. |
+| **`core/routing.py`** | **`run_optimized_routes`**: orchestrates merge → cluster → assign → GA → graph metrics → VRPTW check → optional OSRM; builds **`RouteResult`** rows and **`pipeline` summary** (OSRM + VRPTW blocks). **`summarize_savings`** compares naive vs optimized km. **`select_route_polyline`** picks OSRM vs straight line for drawing. | This is the **conductor** of the whole show; keeps stages composable and testable. |
+| **`core/batching.py`** | **`merge_same_location_orders`**: combines identical-drop orders. **`greedy_dynamic_batch`**: streaming-style batching demo from raw orders. | Merging reduces duplicate stops; batching shows an alternative “wave” mindset used in online dispatch papers. |
+| **`core/clustering.py`** | **`cluster_deliveries_dbscan`**: density clustering on lat/lon (sklearn **DBSCAN**, Haversine metric); noise relabeled so every stop belongs to some group. | Groups “deliver here, here, and here today” into one driver tour without manual zoning. |
+| **`core/driver_assignment.py`** | **`stops_by_cluster`**, **`assign_nearest_driver`**: centroid of cluster vs driver locations. | Simple, fast **first pass** assignment; good baseline before more advanced fleet assignment. |
+| **`core/ga_optimizer.py`** | **`optimize_route_ga`**: DEAP genetic search over visit permutations (PMX crossover, shuffle mutation, tournament selection, elite). **`optimize_route_ga_vrptw`**: same machinery but fitness adds **lateness** and **waiting** penalties. **`tour_distance_km`**: reports true Haversine tour length. | Exact TSP/VRPTW is expensive; GA explores many orders under a time budget and often finds strong routes. |
+| **`core/graph_search.py`** | Builds a **k-nearest-neighbor geographic graph** (NetworkX), runs **Dijkstra** shortest path by km, and a custom **A\*** fastest-time-style path using a heuristic. | Graph path length is a richer proxy than summing raw great-circle legs when intermediate waypoints matter on sparse graphs. |
+| **`core/vrptw.py`** | **`VRPTWConfig`**, **`travel_time_min`**, **`validate_route_feasibility`** (forward simulation with capacity + windows), **`slack_time_windows`** (widen windows for demo stability when not in VRPTW optimize mode). | Answers “**Is this ordered route actually legal?**” without claiming globally optimal VRPTW. |
+| **`core/osrm_client.py`** | Small **urllib** HTTP client: health check, `/route/v1/driving`, lon/lat flips, status enums. | Keeps road routing **optional** and dependency-light (no `requests` required for the core app, though `requests` is listed for tests/tooling). |
+| **`visual_presenter.py`** | Step-by-slide matplotlib walkthrough (`present_full_pipeline`). | Teaching / demos — shows *why* each stage changed the map. |
+| **`visual_osrm_app.py`** | Click orders/drivers, **Run pipeline**, optional OSRM, VRPTW toggle, sample CSV load; writes the same **CSV/JSON** pattern as CLI. | Hands-on exploration without editing code. |
+| **`simulator.py`** | Scripted toy scenarios (`run_all`) for edge cases. | Regression / sanity narratives in JSON output. |
+| **`tests/`** | e.g. `test_osrm_optional_behavior.py` stubs OSRM and checks fallbacks. | Protects optional-mode contracts when refactoring. |
+| **`OSRM/`** | Docker + shell scripts + `tests/test_osrm_api.py` for a local server. | Turns OpenStreetMap into driveable metrics Last-Mile can query. |
+| **`data/*.csv`** | Sample orders/drivers (including **`sample_orders_vrptw.csv`** with **`preferred_minute`** for tight demos). | Copy/paste templates for your own experiments. |
+
+---
+
+## Algorithms in one place
+
+| Idea | Type | What problem it solves | Why this choice |
+|------|------|------------------------|-----------------|
+| **Merge by rounded coordinate** | Heuristic | Duplicate pins at the same building | Avoids double-counting stops and aligns with map snapping noise. |
+| **DBSCAN** | Classic clustering (Ester et al.) | “Which drops are geographically one run?” | Handles irregular shapes; no need to pre-specify cluster count. |
+| **Nearest centroid → driver** | Greedy assignment | “Which driver owns this blob?” | Simple and interpretable baseline. |
+| **Genetic algorithm (DEAP)** | Metaheuristic | **Stop order** is a huge permutation search space | Flexible; easy to change fitness (distance vs VRPTW penalty). |
+| **k-NN geographic graph** | Graph construction | Connect nearby points as “roads” in the abstract | Keeps graph sparse for speed while approximating coherent chains. |
+| **Dijkstra** | Shortest path (non-negative edges) | Minimum **km** on that graph between two stops | Standard, trustworthy baseline for “graph distance.” |
+| **A\*** | Heuristic search | Faster-than-blind search toward a goal with admissible heuristic | Here used for **fastest-time** flavored legs on the same graph (see `astar_fastest_path`). |
+| **VRPTW forward check** | Deterministic simulation | After ordering: “capacity + windows + duration OK?” | O(stops) — cheap sanity check; no exponential exact solver needed for the demo. |
+| **OSRM MLD** | External engine | Real road distance/time/geometry | Ground truth for maps; optional so core works offline. |
+
+---
+
+## CSV and JSON: loading data and saving results
+
+**Why CSV and JSON together?** JSON is nested and precise — good for programs. CSV is flat — good for spreadsheets and quick charts. Last-Mile writes **both** with the **same UTC timestamp** in the filename so you always know which rows belong to which run.
+
+### Reading inputs (CSV → Python dicts)
+
+- **`utils.load_orders_csv(path)`** expects a header **exactly** matching either:
+  - nine columns: `order_id`, `user_id`, `pickup_lat`, `pickup_lon`, `drop_lat`, `drop_lon`, `tw_start_min`, `tw_end_min`, `parcel_weight`, or
+  - those nine **plus** optional `preferred_minute` (minutes since midnight, 0–1439) for labeling **preferred** delivery times on reports.
+- **`utils.load_drivers_csv(path)`** expects: `driver_id`, `current_lat`, `current_lon`, `capacity`.
+
+The CLI requires **both** paths together:
+
+```bash
+python main.py --orders-csv data/sample_orders.csv --drivers-csv data/sample_drivers.csv
+```
+
+The same pair works with `--visual-input` to preload the map app.
+
+### Writing outputs (every CLI or visual “Run pipeline”)
+
+| Artifact | Location | Contents (plain words) |
+|----------|----------|-------------------------|
+| **JSON** | `output/json/pipeline_run_<stamp>.json` | Clustering, per-route metrics, savings totals, simulator block, and `pipeline` metadata (OSRM + VRPTW summary). |
+| **CSV** | `output/csv/pipeline_run_<stamp>.csv` | One **row per optimized route** (cluster); repeated columns for run-level totals so each row is self-contained for Excel pivots. Includes `vrptw_detail_json`, ETAs, OSRM fields, and effective distance/source. |
+| **Images** | `output/images/` | e.g. `clusters_routes_<stamp>.png`, `before_after_<stamp>.png`, presenter frames, or `osrm_visual_process_<stamp>.png` from the GUI. |
+
+Helpers live in **`pipeline_csv_log.py`**: `build_pipeline_report_dict`, `save_pipeline_report_json`, `write_pipeline_run_csv`, `new_run_stamp_utc`.
+
+Stdlib **`csv`** and **`json`** are used — no pandas required for these paths.
+
+---
+
+## VRPTW: two roles (check vs optimize)
+
+**VRPTW** stands for **Vehicle Routing Problem with Time Windows**: each stop may only be served between a **start** and **end** time, and the vehicle has **limited capacity**.
+
+This codebase uses VRPTW in **two different ways**:
+
+1. **Always-on feasibility check — `validate_route_feasibility` (`core/vrptw.py`)**  
+   After a route is chosen, the code **plays the route forward in time**: drive → arrive → wait if early → serve → repeat. If you miss a window or exceed capacity, `vrptw_ok` is false and `vrptw_detail` lists violations. **Reason:** cheap, clear pass/fail for any sequence.
+
+2. **Optional GA mode — `--use-vrptw` + `optimize_route_ga_vrptw` (`core/ga_optimizer.py`)**  
+   The genetic algorithm’s fitness adds **large penalties for arriving late** and smaller penalties for **idle waiting**. **Reason:** distance-only GA might put a “far but urgent” stop last; VRPTW-aware GA biases order toward **hitting deadlines**, even if total kilometers rise slightly.
+
+**Interaction with time windows after merging.**  
+When **`--use-vrptw` is off**, `run_optimized_routes` may **widen** windows with `slack_time_windows(..., pad_min=45)` so merged stops rarely get impossible intersections. When **`--use-vrptw` is on**, that slack is **skipped** so your CSV windows reflect your real intent.
+
+**`preferred_minute` in CSV.**  
+Loaded into each order dict when present; the pipeline carries **`preferred_minute_ordered`** on each `RouteResult` for reporting (the strict feasibility rules still use `time_window`).
 
 ---
 
@@ -97,13 +224,13 @@ flowchart LR
 ```mermaid
 flowchart TD
     A[orders + drivers] --> B[merge_same_location_orders]
-    B --> C[slack_time_windows]
+    B --> C[slack_time_windows<br/>skipped if use_vrptw]
     C --> D[cluster_deliveries_dbscan]
     D --> E[stops_by_cluster]
     E --> F[assign_nearest_driver]
     F --> G[for each cluster]
-    G --> H[optimize_route_ga<br/>permutation -> visit order]
-    H --> I[astar_tour_length<br/>Dijkstra vs A* on kNN graph]
+    G --> H[optimize_route_ga<br/>or optimize_route_ga_vrptw]
+    H --> I[graph legs<br/>Dijkstra km + A* time legs on kNN graph]
     I --> J[validate_route_feasibility<br/>VRPTW windows + capacity]
     J --> K{use_osrm?}
     K -- "no" --> L[RouteResult<br/>osrm_status='not_requested']
@@ -114,7 +241,7 @@ flowchart TD
     L --> Q[summarize_savings]
     O --> Q
     P --> Q
-    Q --> R[JSON report + plots]
+    Q --> R[JSON + CSV + PNG under output/]
 ```
 
 ---
@@ -279,9 +406,9 @@ OSRM is wired in as a **best-use enhancement layer**, never a hard dependency. E
 - **Preflights OSRM once per run.** Before the route loop, `run_optimized_routes` issues a fast `nearest/v1/driving` probe with a tight timeout. The result is cached on the pipeline summary (`pipeline.osrm.connected` + `pipeline.osrm.reason`).
 - **Enriches per route when reachable.** When the probe succeeds, the GA-chosen visit order for each cluster is also routed via OSRM to add `osrm_road_km`, `osrm_duration_min`, and a polyline `osrm_geometry` to the `RouteResult`.
 - **Surfaces an "effective metric" on every route.** Each `RouteResult` exposes four additive fields that pick the best-available source for downstream reports/plots:
-  - `effective_distance_km` — picked from OSRM → A\* → GA in that order.
+  - `effective_distance_km` — picked from OSRM → **Dijkstra graph km** → GA proxy in that order.
   - `effective_duration_min` — OSRM duration when present; otherwise distance ÷ 25 km/h proxy.
-  - `effective_distance_source` — `osrm` | `astar` | `ga_proxy`.
+  - `effective_distance_source` — `osrm` | `dijkstra` | `ga_proxy`.
   - `effective_time_source` — `osrm` | `proxy`.
 - **Reports coverage.** `pipeline.osrm.enriched_routes / total_routes` tells you how many routes got real road metrics, even on partial-failure runs.
 - **Prints status to the console.** See [example logs](#example-logs) below.
@@ -313,7 +440,7 @@ In all cases the route count is unchanged, every route gets effective distance/t
 $ python main.py
 OSRM: not requested (pass --use-osrm to enable road enrichment)
 { ...JSON report... }
-Figures written: .../output_clusters_routes.png .../output_before_after.png
+Figures written: .../output/images/clusters_routes_<stamp>.png .../output/images/before_after_<stamp>.png
 ```
 
 `pipeline.osrm` block in the JSON:
@@ -338,7 +465,7 @@ $ python main.py --use-osrm --osrm-url http://localhost:5000
 OSRM: requested at http://localhost:5000 (preflight pending...)
 OSRM: connected (mode=core_plus_osrm)
 { ...JSON report... }
-Figures written: .../output_clusters_routes.png .../output_before_after.png
+Figures written: .../output/images/clusters_routes_<stamp>.png .../output/images/before_after_<stamp>.png
 OSRM enriched routes: 7/7
 ```
 
@@ -364,7 +491,7 @@ $ python main.py --use-osrm --osrm-url http://localhost:5000
 OSRM: requested at http://localhost:5000 (preflight pending...)
 OSRM: not connected (unavailable), using core routing
 { ...JSON report... }
-Figures written: .../output_clusters_routes.png .../output_before_after.png
+Figures written: .../output/images/clusters_routes_<stamp>.png .../output/images/before_after_<stamp>.png
 OSRM enriched routes: 0/7
 ```
 
@@ -388,7 +515,7 @@ OSRM enriched routes: 0/7
 ### Visual surfacing
 
 - The `--present` slideshow's slide 6 ("Navigation · OSRM/A\* · VRPTW") prints `OSRM road geometry: connected (X/Y)` or `OSRM road geometry: not connected (reason)`. Slide 8's subtitle echoes the same.
-- The click-based `--visual-input` app shows a single-line OSRM status (`OSRM: connected (X/Y enriched)` / `OSRM: partial enrichment X/Y` / `OSRM: not connected (reason)`) both in its right-side info panel and as the figure subtitle of `output_osrm_visual_process.png`. Route polylines fall back to the straight-line `driver → ordered drops` chain whenever OSRM geometry is missing or a degenerate near-zero-length artifact.
+- The click-based `--visual-input` app shows OSRM status in its panel and on the figure subtitle. PNG path: `output/images/osrm_visual_process_<stamp>.png`. Route polylines fall back to the straight-line `driver → ordered drops` chain whenever OSRM geometry is missing or a degenerate near-zero-length artifact.
 
 ### Tests covering the optional behavior
 
@@ -431,7 +558,7 @@ flowchart LR
         O2[Process: clusters + assignment dashed lines]
         O3[Output: optimized polylines<br/>OSRM road geometry when available]
         O4[Footer: GA km, A* km, OSRM km, status counts]
-        O5[PNG saved: output_osrm_visual_process.png]
+        O5[PNG saved under output/images/]
     end
 
     Stage1 --> Stage2 --> Stage3
@@ -449,11 +576,11 @@ Buttons (rendered along the bottom of the window):
 |--------|----------|
 | **Order mode** | Subsequent map clicks add a new order with `parcel_weight=1.0`, time window `09:00–18:00`, and the click point as `drop`. |
 | **Driver mode** | Subsequent map clicks add a new driver with `capacity=30.0` and the click point as `current_location`. |
-| **Load sample** | Loads `synthetic_orders(18, seed=8)` + `synthetic_drivers(4, seed=8)` so you can run end-to-end without clicking anything. |
+| **Load sample** | Loads **`data/sample_orders.csv`** or **`data/sample_orders_vrptw.csv`** (when VRPTW mode is on) plus **`data/sample_drivers.csv`**, or synthetic fallback if files are missing. |
 | **Run pipeline** | Calls `run_optimized_routes(..., use_osrm=True)` against the configured OSRM URL and pops a 3-panel result figure. |
 | **Reset** | Clears all orders and drivers. |
 
-The right-hand info panel always shows current mode, count of orders/drivers, the OSRM URL, and — after a run — the savings line plus the path of the saved figure (`output_osrm_visual_process.png`).
+The right-hand info panel lists mode, counts, OSRM URL, artifact paths (`output/csv/...`, `output/json/...`, `output/images/...`), and savings when available.
 
 ---
 
@@ -461,21 +588,30 @@ The right-hand info panel always shows current mode, count of orders/drivers, th
 
 | Path | Role |
 |------|------|
-| `main.py` | CLI entry: builds synthetic data, runs pipeline (`--present` / `--use-osrm` / `--visual-input` optional), simulations, plots, prints JSON. |
-| `core/batching.py` | Same-coordinate merge (`merge_same_location_orders`) + greedy streaming batches (`greedy_dynamic_batch`). |
-| `core/clustering.py` | `cluster_deliveries_dbscan`: DBSCAN on lat/lon, noise labels remapped to singleton cluster ids. |
-| `core/driver_assignment.py` | `stops_by_cluster`, `assign_nearest_driver`: centroid heuristic. |
-| `core/ga_optimizer.py` | DEAP-backed GA: PMX crossover, shuffle mutation, tournament selection, elite. |
-| `core/graph_search.py` | Geographic graph (`networkx`), Dijkstra, manual A\* with Haversine heuristic. |
-| `core/vrptw.py` | Forward-time feasibility: travel from Haversine/speed, service time, windows, capacity. |
-| `core/routing.py` | `run_optimized_routes`, `summarize_savings`, `astar_tour_length`, `RouteResult` (now with OSRM fields). |
-| `core/osrm_client.py` | `OsrmClient` + `OsrmRoute`: stdlib HTTP client for OSRM `/route/v1/driving`. |
-| `utils.py` | Haversine, `ODISHA_REGION_CENTER`, synthetic data generators, plotting helpers. |
-| `simulator.py` | Small scripted scenarios (`run_all`): duplicate drops, collinear tour, insertion waves. |
-| `visual_presenter.py` | Step-by-step Matplotlib walkthrough (`present_full_pipeline`); slide 06 mentions OSRM, slide 08 adds an OSRM bar when totals are present. |
-| `visual_osrm_app.py` | Click-based graphical input → process → output app with optional OSRM road geometry. |
-| `OSRM/` | Docker `docker-compose.yml`, MLD scripts, and API tests for a local OSRM India server. |
-| `requirements.txt` | Pinned dependency minimum versions. |
+| `main.py` | CLI: synthetic or **CSV** inputs; flags `--present`, `--use-osrm`, `--use-vrptw`, `--visual-input`, `--viz-mode`; writes **`output/csv`**, **`output/json`**, **`output/images`**; prints JSON. |
+| `pipeline_csv_log.py` | **`build_pipeline_report_dict`**, **`save_pipeline_report_json`**, **`write_pipeline_run_csv`**, UTC stamps, directory helpers. |
+| `map_basemap.py` | **`graph`** vs **`map`** plots; optional **contextily** OSM tiles; env **`CHITRA_VIZ_MODE`**, **`CHITRA_NO_BASEMAP`**. |
+| `data/sample_orders.csv` | Example orders (core columns); region aligned with demos. |
+| `data/sample_orders_vrptw.csv` | Example orders including **`preferred_minute`** and tighter windows for VRPTW demos. |
+| `data/sample_drivers.csv` | Example drivers (`driver_id`, position, `capacity`). |
+| `output/csv/` | Timestamped **`pipeline_run_*.csv`** (one row per route + run-level columns). |
+| `output/json/` | Timestamped **`pipeline_run_*.json`** (full structured report). |
+| `output/images/` | Timestamped PNGs: **`clusters_routes_*.png`**, **`before_after_*.png`**, presenter **`pipeline_present_*`**, visual app **`osrm_visual_process_*`**. |
+| `core/batching.py` | `merge_same_location_orders`, `greedy_dynamic_batch`. |
+| `core/clustering.py` | `cluster_deliveries_dbscan` (sklearn DBSCAN, Haversine). |
+| `core/driver_assignment.py` | `stops_by_cluster`, `assign_nearest_driver`. |
+| `core/ga_optimizer.py` | `optimize_route_ga`, `optimize_route_ga_vrptw`, `tour_distance_km` (DEAP). |
+| `core/graph_search.py` | kNN graph (**NetworkX**), **Dijkstra**, **A\*** fastest-time-style legs. |
+| `core/vrptw.py` | `validate_route_feasibility`, `slack_time_windows`, `VRPTWConfig`. |
+| `core/routing.py` | `run_optimized_routes`, `summarize_savings`, `RouteResult`, `cluster_route_graph_metrics`, `select_route_polyline`. |
+| `core/osrm_client.py` | `OsrmClient`, `OsrmRoute` (stdlib HTTP). |
+| `utils.py` | Haversine, synthetic generators, **`load_orders_csv`**, **`load_drivers_csv`**, plotting. |
+| `simulator.py` | `run_all` toy scenarios for JSON demos. |
+| `visual_presenter.py` | `present_full_pipeline` slideshow; writes under **`output/images/`** when driven from `main.py`. |
+| `visual_osrm_app.py` | Click UI; VRPTW toggle; sample CSV load; same CSV/JSON artifact pattern as CLI. |
+| `tests/` | Pytest modules (e.g. OSRM optional behavior). |
+| `OSRM/` | Docker Compose, map download/clip/build scripts, API smoke test. |
+| `requirements.txt` | Minimum versions for Python dependencies (see below). |
 
 ---
 
@@ -484,7 +620,7 @@ The right-hand info panel always shows current mode, count of orders/drivers, th
 **Python**: 3.11+ recommended (development used 3.13 in one environment).
 
 ```bash
-cd /path/to/Last-Mile
+cd /path/to/Chitra
 python3 -m venv venv
 source venv/bin/activate   # Windows (PowerShell): .\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -493,13 +629,16 @@ python -m pip install -r requirements.txt
 
 ### `requirements.txt` (verbatim minimums)
 
-- `numpy>=1.24`
-- `pandas>=2.0` — listed for the environment stack; **not imported by first-party Last-Mile code today** (handy if you ingest CSV/API data later).
-- `networkx>=3.0` — graphs and Dijkstra in `core/graph_search.py`.
-- `scikit-learn>=1.3` — DBSCAN in `core/clustering.py`; **SciPy is pulled in transitively** by scikit-learn.
-- `scipy>=1.11` — not imported directly by Last-Mile; ensures a compatible SciPy alongside sklearn.
-- `matplotlib>=3.7` — all figures in `utils.py`, `visual_presenter.py`, and `visual_osrm_app.py`.
-- `deap>=1.4` — genetic algorithm scaffolding in `core/ga_optimizer.py`.
+- `numpy>=1.24` — arrays for clustering, centroids, plotting.
+- `pandas>=2.0` — **not imported** by first-party source today; kept for notebooks, analytics, or future ETL beside the stdlib CSV loaders.
+- `networkx>=3.0` — graph structure and **Dijkstra** in `core/graph_search.py`.
+- `scikit-learn>=1.3` — **DBSCAN** in `core/clustering.py`; **SciPy** is pulled in transitively.
+- `scipy>=1.11` — ensures a compatible SciPy alongside scikit-learn (not always imported directly).
+- `matplotlib>=3.7` — all figures (`utils.py`, `visual_presenter.py`, `visual_osrm_app.py`).
+- `deap>=1.4` — genetic algorithm toolbox in `core/ga_optimizer.py`.
+- `contextily>=1.6.0` — optional **OpenStreetMap** tiles under plots when `--viz-mode map` (see `map_basemap.py`); safely skipped if unset or offline.
+- `pytest>=7.0` — running `tests/`.
+- `requests>=2.28` — **OSRM** smoke test script (`OSRM/tests/test_osrm_api.py`) and convenient HTTP in dev; the in-app **`OsrmClient`** uses **stdlib `urllib`** so the core pipeline does not hard-depend on `requests`.
 
 ### OSRM (optional, only for `--use-osrm` and `--visual-input`)
 
@@ -521,43 +660,53 @@ Run from repo root after activating `venv` and installing dependencies:
 source venv/bin/activate
 ```
 
-**Standard run** (non-interactive pipeline, PNGs saved next to `main.py`, JSON on stdout):
+**Standard run** (writes **`output/csv/pipeline_run_<stamp>.csv`**, **`output/json/pipeline_run_<stamp>.json`**, **`output/images/clusters_routes_<stamp>.png`**, **`output/images/before_after_<stamp>.png`**; prints the same JSON to stdout):
 
 ```bash
 python main.py
 ```
 
+**Run from CSV** (both paths required):
+
+```bash
+python main.py --orders-csv data/sample_orders.csv --drivers-csv data/sample_drivers.csv
+```
+
+**Time-window-aware GA** (optimize stop order with lateness penalties, and **do not** widen merged windows):
+
+```bash
+python main.py --use-vrptw
+```
+
+Combine CSV + VRPTW + OSRM as needed, for example:
+
+```bash
+python main.py --orders-csv data/sample_orders_vrptw.csv --drivers-csv data/sample_drivers.csv --use-vrptw --use-osrm --osrm-url http://localhost:5001
+```
+
 **Visual walkthrough** (Matplotlib slides; pauses between steps if a display is available):
 
 ```bash
-python main.py --present [--pause SECONDS]
+python main.py --present [--pause SECONDS] [--viz-mode map|graph]
 ```
 
-Default pause is **2** seconds (`--pause`).
+Default pause is **2** seconds (`--pause`). Pass **`--use-vrptw`** / **`--use-osrm`** as for the non-presenter run.
 
-**Use local OSRM road routing** after GA sequencing:
+**Use local OSRM** after GA sequencing:
 
 ```bash
 python main.py --use-osrm --osrm-url http://localhost:5001
 ```
 
-If OSRM is reachable, route results include `osrm_road_km`, `osrm_duration_min`, `osrm_status`, and plotted **road** geometry. If OSRM is offline or rejects a route, Last-Mile still completes using the existing GA/A\* fallback metrics and records the OSRM status in the JSON `pipeline.osrm` block.
-
-**Visual walkthrough + OSRM**:
-
-```bash
-python main.py --present --use-osrm
-```
-
-Slide 06 (navigation/VRPTW) shows whether OSRM was requested; slide 08 (summary) adds an OSRM bar to the bar chart and an "km saved (OSRM)" line when totals are available.
+Default CLI **`--osrm-url`** is `http://localhost:5000`. Match this to your Docker host port (`OSRM_HOST_PORT` in `OSRM/scripts/run_server.sh` is often **5001**).
 
 **Graphical input → process → output app**:
 
 ```bash
-python main.py --visual-input --osrm-url http://localhost:5001 --viz-mode map
+python main.py --visual-input [--orders-csv ... --drivers-csv ...] [--use-vrptw] --osrm-url http://localhost:5001 --viz-mode map
 ```
 
-Use the buttons to add order drops and driver starts by clicking the map, or load a sample dataset. `Run pipeline` opens a visual three-panel result: raw input, cluster/driver assignment process, and optimized output routes. The result is also saved as `output_osrm_visual_process.png`.
+Use the buttons to add orders/drivers, **Load sample** (CSV under `data/` when VRPTW is on/off), **Run pipeline** (three-panel figure). Artifacts use the same **`pipeline_run_<stamp>`** / **`osrm_visual_process_<stamp>.png`** naming under **`output/`**.
 
 **Headless / CI / SSH**: avoid blocking on interactive windows and still save presenter frames:
 
@@ -566,7 +715,7 @@ export Last-Mile_HEADLESS=1
 python main.py --present
 ```
 
-Presenter PNGs follow the pattern `output_pipeline_##_*.png` in the project directory.
+Presenter PNGs: **`output/images/pipeline_present_<stamp>_##_*.png`**.
 
 **Simulations only** (JSON to stdout):
 
@@ -584,12 +733,14 @@ python visual_presenter.py
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--present` | off | Run `visual_presenter.present_full_pipeline` slideshow; saves `output_pipeline_##_*.png`. |
+| `--present` | off | Run `visual_presenter.present_full_pipeline`; saves frames under `output/images/`. |
 | `--pause SECONDS` | `2.0` | Time between presenter slides when a display is active. |
-| `--use-osrm` | off | Evaluate optimized routes against a local OSRM server and prefer its geometry for plots. |
-| `--osrm-url URL` | `http://localhost:5000` | OSRM base URL. Used by `--use-osrm` and `--visual-input`. |
-| `--visual-input` | off | Launch the click-based graphical I/O app (`visual_osrm_app.py`); short-circuits the JSON-on-stdout flow. |
-| `--viz-mode graph|map` | `map` | Plot mode (`graph` = plain lon/lat grid, `map` = OSM basemap tiles when available). |
+| `--use-osrm` | off | Evaluate optimized routes against a local OSRM server; prefer road geometry in plots when present. |
+| `--use-vrptw` | off | Use **`optimize_route_ga_vrptw`**; skip post-merge window slack. |
+| `--osrm-url URL` | `http://localhost:5000` | OSRM base URL for `--use-osrm` and `--visual-input`. |
+| `--visual-input` | off | Launch the click-based app; short-circuits stdout JSON (still writes CSV/JSON when you run the pipeline from the app). |
+| `--viz-mode graph|map` | from `CHITRA_VIZ_MODE` or **`map`** | `graph` = grid-only; `map` = OSM tiles via contextily when available. |
+| `--orders-csv` / `--drivers-csv` | none | Load inputs from CSV (must pass **both**). |
 
 ---
 
@@ -607,6 +758,7 @@ Last-Mile consumes plain **dict** records (as produced by `synthetic_orders` / `
 | `drop` | `(lat, lon)` | Destination (degrees) |
 | `time_window` | `[start_min, end_min]` | Minutes-from-midnight style (consistent with synth generator) |
 | `parcel_weight` | `float` | Load in kg (merged stops sum weights) |
+| `preferred_minute` | `float`, optional | Preferred delivery minute (0–1439) from CSV; carried into `preferred_minute_ordered` on each route for reporting |
 
 ### Driver dict
 
@@ -616,7 +768,7 @@ Last-Mile consumes plain **dict** records (as produced by `synthetic_orders` / `
 | `current_location` | `(lat, lon)` | Start position |
 | `capacity` | `float` | Max cumulative parcel weight |
 
-The `--visual-input` app emits records of this exact shape: clicked orders default to `parcel_weight=1.0`, `time_window=[540, 1080]`; clicked drivers default to `capacity=30.0`.
+The `--visual-input` app emits records of this exact shape: clicked orders default to `parcel_weight=1.0`, `time_window=[540, 1080]`; clicked drivers default to `capacity=30.0`. For a tabular template, copy **`data/sample_orders.csv`** or **`data/sample_orders_vrptw.csv`** plus **`data/sample_drivers.csv`**.
 
 ---
 
@@ -632,7 +784,9 @@ The `--visual-input` app emits records of this exact shape: clicked orders defau
 
 ### 2. Time window slack — `slack_time_windows` (`core/vrptw.py`)
 
-In `run_optimized_routes`, merged stops optionally get windows widened by `pad_min` (default **45** minutes) **in-place** to reduce degenerate overlaps after merges.
+When **`use_vrptw=False`** (default), `run_optimized_routes` **widens** merged stops’ windows by `pad_min` (**45** minutes) **in-place** so tight intersections after merging are less likely to confuse demos.
+
+When **`use_vrptw=True`**, this slack is **not applied** — your CSV (or synthetic) windows are treated as authoritative so the VRPTW-aware GA optimizes against the real constraints.
 
 ### 3. Greedy dynamic batching — `greedy_dynamic_batch` (`core/batching.py`)
 
@@ -654,20 +808,21 @@ Processes **original** orders in arrival order:
 - Picks driver minimizing Haversine **centroid → current_location**, tie-break **lower driver_id**.
 - Does **not** enforce one-driver-one-cluster globally (multiple clusters may map to same driver depending on centroid geometry).
 
-### 6. Genetic optimization per cluster — `optimize_route_ga` (`core/ga_optimizer.py`)
+### 6. Genetic optimization per cluster — `optimize_route_ga` / `optimize_route_ga_vrptw` (`core/ga_optimizer.py`)
 
 - **Encoding**: permutation of indices `{0 … n−1}` = visit order (**open tour** from driver start, no return leg).
 - **DEAP**: `FitnessMinVRPTW` (weights `(-1,)` minimize), `IndividualPermGA` subtype of `list`.
 - **Operators**: `tools.cxPartialyMatched`, `tools.mutShuffleIndexes` (`indpb=0.15`), `tools.selTournament` (`tournsize=3`), elite best individual each generation.
-- **Fitness scalar**: distance + **0.25** × (distance / speed) + **0.05** × (0.35 × distance proxy); defaults `pop_size=100`, `generations=70`, `cx_prob=0.85`, `mut_prob=0.35`, `speed_kmh=25`.
+- **Distance-only mode** (`optimize_route_ga`): fitness combines **Haversine tour length**, time proxy, light fuel-style term; defaults `pop_size=100`, `generations=70`, `cx_prob=0.85`, `mut_prob=0.35`, `speed_kmh=25`.
+- **VRPTW mode** (`optimize_route_ga_vrptw`, when `--use-vrptw`): same operators but fitness adds **heavy lateness** and mild **waiting** penalties; population is seeded ~30% with “earliest window first” permutations to start near feasible schedules; default `generations=100`.
 
-### 7. Graph legs and A\* — `astar_tour_length` (`core/routing.py`) + `core/graph_search.py`
+### 7. Graph legs (Dijkstra + A\*) — `cluster_route_graph_metrics` (`core/routing.py`) + `core/graph_search.py`
 
-- `build_geographic_graph`: nodes rounded to **9** decimals as graph keys; edges weighted by **Haversine km**.
+- `build_geographic_graph`: nodes rounded to **9** decimals as graph keys; edges weighted by **Haversine km** (and travel-time weights for A\*).
 - For **≤5** nodes, graph is **complete**; otherwise **k-NN with k=4** (bidirectional nearest neighbors added).
-- `astar_shortest_path`: custom **`heapq`** priority queue + admissible **Haversine-to-goal** heuristic.
-- `dijkstra_shortest_path`: **`networkx.single_source_dijkstra`** with `weight='km'`.
-- Each consecutive pair in the GA order adds one leg distance; **`benchmark_dijkstra_vs_astar`** checks equality for reporting (`dijkstra_star_equal` on `RouteResult`).
+- **`dijkstra_shortest_path`**: **`networkx.single_source_dijkstra`** with `weight='km'` — summed leg km is the authoritative **graph chain length**.
+- **`astar_fastest_path`**: custom **`heapq`** priority queue + heuristic — **fastest-time-style** legs and **ETA minutes** per stop (for `eta_arrival_min` / A\* km tallies).
+- **Per leg**, Dijkstra km and A\* km are compared (`dijkstra_star_equal` on `RouteResult`).
 
 ### 8. VRPTW validation — `validate_route_feasibility` (`core/vrptw.py`)
 
@@ -689,11 +844,11 @@ Triggered only when `run_optimized_routes(..., use_osrm=True)`:
 - Stores `osrm_road_km`, `osrm_duration_min`, `osrm_geometry`, and `osrm_status` on the `RouteResult`.
 - On `unavailable` / `http_error`, the orchestrator caches the failure status and skips remaining OSRM calls for the run.
 
-### 10. Baselines and reporting — `summarize_savings`, `main.py`
+### 10. Baselines and reporting — `summarize_savings`, `main.py`, `pipeline_csv_log.py`
 
 - **Naive**: sum over stops of min driver→drop Haversine (independent legs, no chaining).
-- **Optimized**: sums GA tour km, summed A\* graph-chain km, and (when fully populated) summed OSRM road km across clusters.
-- `main.py` also calls `simulator.run_all()` for curated scenario dictionaries and emits a large JSON payload (routes, clustering, totals, simulations, pipeline summary, OSRM status counts).
+- **Optimized**: sums GA tour km, **Dijkstra** summed graph km per route (see `optimized_dijkstra_graph_km` / `optimized_astar_graph_km` in savings — the latter key aliases the same graph total for historical compatibility), per-leg **A\*** km tallies, and (when every route has OSRM) summed OSRM road km.
+- `main.py` calls `simulator.run_all()`, prints JSON to stdout, and **`build_pipeline_report_dict` + `save_pipeline_report_json` + `write_pipeline_run_csv`** persist the same run under `output/json/` and `output/csv/` with a matching stamp.
 
 ---
 
@@ -780,7 +935,7 @@ This is what makes `--use-osrm` safe to leave on: even with OSRM stopped, the ru
 
 | Library | Role in Last-Mile | Where used |
 |---------|-----------------|------------|
-| **Python standard library** (`argparse`, `json`, `pathlib`, `dataclasses`, `typing`, `collections`, `heapq`, `math`, `random`, `os`, `urllib`) | CLI, structs, heaps for A\*, math for Haversine, RNG for synthetic data, env for headless mode, **HTTP for OSRM client** | Across `main.py`, `core/*`, `utils.py`, `visual_presenter.py`, `visual_osrm_app.py` |
+| **Python standard library** (`argparse`, `json`, `csv`, `pathlib`, `dataclasses`, `typing`, `collections`, `heapq`, `math`, `random`, `datetime`, `os`, `urllib`) | CLI, report serialization, **CSV loads/exports**, heaps for A\*, Haversine math, RNG, env vars, **HTTP for OSRM client** | Across `main.py`, `core/*`, `utils.py`, `pipeline_csv_log.py`, `visual_*` |
 | **NumPy** | Coordinate arrays for DBSCAN, clustering labels, centroid means, plotting color arrays | `core/clustering.py`, `core/driver_assignment.py`, `utils.py`, `visual_presenter.py`, `visual_osrm_app.py` |
 | **scikit-learn** (`sklearn.cluster.DBSCAN`) | Density-based clustering with `metric='haversine'` and Ball Tree | `core/clustering.py` |
 | **SciPy** | Not imported in Last-Mile source; supplied so **sklearn** has a compatible stack | transitive / `requirements.txt` |
@@ -788,34 +943,36 @@ This is what makes `--use-osrm` safe to leave on: even with OSRM stopped, the ru
 | **NetworkX** | Weighted graph, single-source Dijkstra | `core/graph_search.py` |
 | **DEAP** | GA toolbox (creator, permutation ops, selection) | `core/ga_optimizer.py` |
 | **Matplotlib** | Static plots (`pyplot`), patches (`Circle`), styles, slideshow figures, `Button` widgets | `utils.py`, `visual_presenter.py`, `visual_osrm_app.py` |
+| **Contextily** | OSM raster basemap under lon/lat axes (optional) | `map_basemap.py` (import guarded; failures fall back to grid-only) |
+| **pytest** | Automated tests | `tests/`, `pytest` CLI |
+| **requests** | HTTP for OSRM smoke script in Docker test folder | `OSRM/tests/test_osrm_api.py` |
 | **Docker / OSRM** | External service: OSM extraction, MLD partitioning + customization, HTTP routing | `OSRM/docker-compose.yml`, `OSRM/scripts/*.sh`, called via `core/osrm_client.py` |
 
 ---
 
 ## Outputs
 
-Running `main.py` from the repo root writes (by default):
+Each **`main.py`** run emits a shared UTC **`run_stamp`** so artifacts line up:
 
-- `output_clusters_routes.png` — stops colored by cluster label, polylines per driver route. With `--use-osrm`, polylines use OSRM road geometry.
-- `output_before_after.png` — side-by-side naive independent legs vs optimized chains.
+| Artifact | Path pattern | What it contains |
+|----------|----------------|------------------|
+| **CSV** | `output/csv/pipeline_run_<stamp>.csv` | One row per optimized route; run-level totals repeated; VRPTW/ OSRM / effective metrics columns (see `pipeline_csv_log.FIELDNAMES`). |
+| **JSON** | `output/json/pipeline_run_<stamp>.json` | Same structure as stdout: clustering, routes, totals, `pipeline` (includes **`osrm`** and **`vrptw`** blocks), `simulations`. |
+| **Clusters map** | `output/images/clusters_routes_<stamp>.png` | Stops colored by DBSCAN cluster; route polylines (OSRM geometry when `--use-osrm` and data is valid). |
+| **Before / after** | `output/images/before_after_<stamp>.png` | Naive “each stop from nearest driver” vs optimized chained routes. |
 
-With `--present`:
+**`--present`:** step frames under `output/images/pipeline_present_<stamp>_##_*.png`.
 
-- `output_pipeline_00_input.png` … through `…_07_summary.png` (sequential tags: `input`, `merge`, `dbscan`, `assign`, `ga`, `astar_vrptw`, `maps`, `summary`). When `use_osrm=True`, slide 06 notes the OSRM request and slide 08 includes an OSRM bar on the comparison chart and an extra "km saved (OSRM)" summary line.
+**`--visual-input`:** after **Run pipeline**, `output/images/osrm_visual_process_<stamp>.png` plus paired CSV/JSON as in the table above.
 
-With `--visual-input`:
+**Stdout** (CLI without `--visual-input`): pretty-printed JSON (same as file), including:
 
-- `output_osrm_visual_process.png` — three-panel "input / process / output" capture from the click-based app, plus a footer with GA, A\*, OSRM totals and OSRM status counts.
-
-**Stdout**: indented JSON (`json.dumps(..., indent=2, default=str)`) including:
-
-- `clustered_deliveries` — number of merged stops, cluster labels, cluster→driver map
-- `optimized_routes` — per-cluster `RouteResult` rows; every row carries `osrm_road_km`, `osrm_duration_min`, `osrm_status`, plus the additive M2 fields `effective_distance_km`, `effective_duration_min`, `effective_distance_source` (`osrm` | `astar` | `ga_proxy`), and `effective_time_source` (`osrm` | `proxy`)
-- `totals` — `naive_sum_legs_km`, `optimized_ga_open_tour_km`, `optimized_astar_graph_km`, `optimized_osrm_road_km`, `saved_km_vs_naive_*`
-- `delivery_grouping` — representative + merged order ids per stop
-- `comparison_naive_vs_optimized` — flat side-by-side numbers including OSRM
-- `simulations` — `simulator.run_all()` block
-- `pipeline` — merge map + `pipeline.osrm.{requested, base_url, connected, mode, reason, status_counts, enriched_routes, total_routes}` (see [OSRM Optional Mode](#osrm-optional-mode))
+- `run_stamp_utc`, `run_source`
+- `clustered_deliveries` — merged stop count, labels, cluster→driver map  
+- `optimized_routes` — per-cluster metrics; `effective_distance_source` is **`osrm`** | **`dijkstra`** | **`ga_proxy`**; `vrptw` detail dict; `preferred_minute` ordering when present  
+- `totals` — naive and optimized km rolls-ups (GA, Dijkstra graph, A\* leg km, OSRM when complete)  
+- `delivery_grouping`, `comparison_naive_vs_optimized`, `simulations`  
+- `pipeline` — `merge_map`, **`pipeline.osrm.*`**, **`pipeline.vrptw.{enabled, feasible_routes, total_routes}`**
 
 ---
 
@@ -825,6 +982,7 @@ With `--visual-input`:
 - **Drivers**: `synthetic_drivers(5, seed=42)` (same region)
 - **DBSCAN** `eps_km`: **1.4**
 - **OSRM**: off by default; pass `--use-osrm` to enable.
+- **VRPTW optimizer**: off by default; pass `--use-vrptw` for time-window-aware GA (feasibility check always runs).
 - **OSRM URL**: `http://localhost:5000` by default; override with `--osrm-url`.
 
 Adjust these by editing `main.py` or by importing pipeline functions programmatically.
