@@ -304,16 +304,16 @@ Fitness (composite minimization)
         osrm_info: dict[str, Any] | None = None,
     ) -> None:
         self._step_header(
-            "Step 6 / 8 · Navigation · OSRM/A* · VRPTW validation",
-            "GA picks stop order; OSRM road routes are used when available, with A* as the offline graph baseline.",
+            "Step 6 / 8 · Navigation · OSRM / Dijkstra SP / A* ETA · VRPTW",
+            "GA picks stop order; Dijkstra sums shortest-path km on the cluster graph; A* legs drive ETAs; OSRM enriches when available.",
         )
         ax_txt = self._fig.add_axes([0.06, 0.12, 0.88, 0.74])
         ax_txt.axis("off")
-        body = """A*
-  f(n) = g(n) + h(n); h = great-circle miles to goal (research proxy heuristic).
+        body = """A* (quick route + ETA)
+  f(n) = g(n) + h(n); leg km × avg speed → arrival minute per stop (service dwell after).
 
-Dijkstra (benchmark)
-  Same nonnegative graph → shortest-path cost equals A* result on every leg tested.
+Dijkstra (shortest path on cluster graph)
+  kNN graph over driver + cluster drops → authoritative SP km per leg (summed).
 
 VRPTW (feasibility, not solver)
   • Cumulative parcel weight vs vehicle capacity
@@ -425,11 +425,11 @@ VRPTW (feasibility, not solver)
             f"Quantitative gains vs naive baseline.{osrm_subtitle}",
         )
         ax_bar = self._fig.add_axes([0.07, 0.38, 0.48, 0.42])
-        names = ["Naive\n(legs Σ)", "GA open\ntour", "A*\n(graph)"]
+        names = ["Naive\n(legs Σ)", "GA open\ntour", "Dijkstra\n(graph SP)"]
         vals = [
             savings["naive_sum_legs_km"],
             savings["optimized_ga_open_tour_km"],
-            savings["optimized_astar_graph_km"],
+            savings["optimized_dijkstra_graph_km"],
         ]
         cols = ["#8c564b", "#1f77b4", "#ff7f0e"]
         if savings.get("optimized_osrm_road_km", 0.0) > 0:
@@ -448,7 +448,8 @@ VRPTW (feasibility, not solver)
         vr_txt = (
             f"VRPTW routes OK : {vr_ok}/{len(results)}\n"
             f"km saved (GA)  : {savings['saved_km_vs_naive_ga']:.2f}\n"
-            f"km saved (A*)  : {savings['saved_km_vs_naive_astar']:.2f}\n"
+            f"km saved (Dijk.): {savings['saved_km_vs_naive_dijkstra']:.2f}\n"
+            f"km saved (A* ETA chain): {savings['saved_km_vs_naive_astar']:.2f}\n"
             f"km saved (OSRM): {savings.get('saved_km_vs_naive_osrm', 0.0):.2f}\n"
             f"Fleet routes   : {len(results)}\n"
         )

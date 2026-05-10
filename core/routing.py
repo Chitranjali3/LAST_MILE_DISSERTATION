@@ -4,7 +4,9 @@ End-to-end routing orchestration: naive baselines vs. the research pipeline.
 Pipeline (system flow):
   merged same-location stops  →  greedy batching (dynamic pre-grouping)
   → DBSCAN clusters  →  nearest-driver assignment
-  → GA within each cluster  →  A* leg distances on a geographic graph
+  → GA within each cluster  →  graph legs on the cluster kNN geographic graph
+       · Dijkstra: authoritative shortest-path km per leg (summed for the tour)
+       · A*: goal-directed pathfinding; leg km feeds quick-route ETA per stop
   → VRPTW feasibility check per route.
 """
 
@@ -17,7 +19,7 @@ from core.batching import greedy_dynamic_batch, merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
 from core.ga_optimizer import optimize_route_ga, tour_distance_km
-from core.graph_search import astar_shortest_path, benchmark_dijkstra_vs_astar, build_geographic_graph
+from core.graph_search import astar_shortest_path, build_geographic_graph, dijkstra_shortest_path
 from core.osrm_client import OsrmClient
 from core.vrptw import VRPTWConfig, slack_time_windows, validate_route_feasibility
 from utils import haversine_km
@@ -37,7 +39,9 @@ class RouteResult:
     drop_coords_ordered: list[tuple[float, float]]
     metas_ordered: list[dict[str, Any]]
     ga_tour_km: float
+    dijkstra_graph_km: float
     astar_leg_km: float
+    eta_arrival_min: list[float]
     dijkstra_star_equal: bool
     vrptw_ok: bool
     vrptw_detail: dict[str, Any]
@@ -50,7 +54,7 @@ class RouteResult:
     # that only want the best-available metric can read these directly.
     effective_distance_km: float = 0.0
     effective_duration_min: float | None = None
-    effective_distance_source: str = "astar"  # "osrm" | "astar" | "ga_proxy"
+    effective_distance_source: str = "dijkstra"  # "osrm" | "dijkstra" | "ga_proxy"
     effective_time_source: str = "proxy"  # "osrm" | "proxy"
 
 
@@ -83,22 +87,22 @@ def _effective_metrics_for_route(
     *,
     osrm_road_km: float | None,
     osrm_duration_min: float | None,
-    astar_leg_km: float,
+    dijkstra_graph_km: float,
     ga_tour_km: float,
 ) -> tuple[float, float | None, str, str]:
     """Pick the best-available distance/duration source for a single route.
 
     Fallback priority (per checklist M2):
       1. OSRM road metrics when a numeric value is present.
-      2. A* graph metrics fallback (always computed).
-      3. GA fallback for geometry-only edge cases (zero-length A* result).
+      2. Dijkstra shortest-path km on the cluster graph (always computed).
+      3. GA fallback for geometry-only edge cases (zero-length graph result).
     """
     if osrm_road_km is not None and osrm_road_km > 0.0:
         dist = float(osrm_road_km)
         dist_source = "osrm"
-    elif astar_leg_km > 0.0:
-        dist = float(astar_leg_km)
-        dist_source = "astar"
+    elif dijkstra_graph_km > 0.0:
+        dist = float(dijkstra_graph_km)
+        dist_source = "dijkstra"
     else:
         dist = float(ga_tour_km)
         dist_source = "ga_proxy"
@@ -133,31 +137,66 @@ def naive_independent_legs_km(
     return total
 
 
+def cluster_route_graph_metrics(
+    driver_loc: tuple[float, float],
+    ordered_drops: list[tuple[float, float]],
+    *,
+    knn: int | None = 4,
+    vr_cfg: VRPTWConfig | None = None,
+) -> tuple[float, float, list[tuple[float, float, float]], list[float]]:
+    """
+    On the DBSCAN cluster's kNN geographic graph (driver + ordered drops):
+
+    - Dijkstra per leg → summed ``dijkstra_graph_km`` (shortest-path distance).
+    - A* per leg → summed ``astar_leg_km`` and used with ``vr_cfg`` speed to build
+      ETA (minutes from departure until arrival at each drop, before service).
+
+    Returns ``(dijkstra_km, astar_km, leg_diag, eta_arrival_min)`` where leg_diag is
+    ``(dijkstra_km, astar_km, abs(delta))`` per leg.
+    """
+    cfg = vr_cfg or VRPTWConfig()
+    if not ordered_drops:
+        return 0.0, 0.0, [], []
+
+    nodes = [driver_loc] + ordered_drops
+    G = build_geographic_graph(nodes, knn=knn if len(nodes) > 5 else None)
+    dijkstra_sum = 0.0
+    astar_sum = 0.0
+    diag: list[tuple[float, float, float]] = []
+    eta_arrival: list[float] = []
+    clock = 0.0
+    prev = driver_loc
+    speed = cfg.avg_speed_kmh
+    service = cfg.service_time_min
+
+    for nxt in ordered_drops:
+        _, dk = dijkstra_shortest_path(G, prev, nxt)
+        _, ak = astar_shortest_path(G, prev, nxt)
+        dijkstra_sum += dk
+        astar_sum += ak
+        diag.append((dk, ak, abs(dk - ak)))
+
+        travel_min = (ak / speed) * 60.0 if speed > 0 else 0.0
+        clock += travel_min
+        eta_arrival.append(clock)
+        clock += service
+
+        prev = nxt
+
+    return dijkstra_sum, astar_sum, diag, eta_arrival
+
+
 def astar_tour_length(
     driver_loc: tuple[float, float],
     ordered_drops: list[tuple[float, float]],
     *,
     knn: int | None = 4,
 ) -> tuple[float, list[tuple[float, float, float]]]:
-    """
-    Sum A* shortest-path distances on a kNN geographic graph through all legs.
-
-    Returns total kilometers and per-leg diagnostics (dijkstra_km, astar_km)—identical
-    when both find the same shortest path cost on an undirected nonnegative graph.
-    """
-    nodes = [driver_loc] + ordered_drops
-    G = build_geographic_graph(nodes, knn=knn if len(nodes) > 5 else None)
-    legs = 0.0
-    diag: list[tuple[float, float, float]] = []
-    prev = driver_loc
-    for nxt in ordered_drops:
-        _, ak = astar_shortest_path(G, prev, nxt)
-        dk_pairs = benchmark_dijkstra_vs_astar(G, [(prev, nxt)])
-        dk = dk_pairs[0][0]
-        legs += ak
-        diag.append((dk, ak, abs(dk - ak)))
-        prev = nxt
-    return legs, diag
+    """Backward-compatible: returns (A* tour km, leg diagnostics) only."""
+    _dij, ak, diag, _eta = cluster_route_graph_metrics(
+        driver_loc, ordered_drops, knn=knn, vr_cfg=VRPTWConfig()
+    )
+    return ak, diag
 
 
 def run_optimized_routes(
@@ -175,7 +214,7 @@ def run_optimized_routes(
     Returns per-cluster `RouteResult` rows and a summary dictionary.
 
     OSRM is treated as an *optional enrichment layer*: even when `use_osrm=True`
-    the core flow always completes with GA + A* + VRPTW metrics. A fast preflight
+    the core flow always completes with GA + Dijkstra/A* graph legs + VRPTW metrics. A fast preflight
     decides whether OSRM gets invoked at all and the per-route circuit breaker
     short-circuits remaining calls if the server collapses mid-run.
     """
@@ -219,7 +258,10 @@ def run_optimized_routes(
         metas = [merged[idxs[k]] for k in perm]
 
         ga_km = tour_distance_km(perm, cluster_coords, tuple(drv["current_location"]))
-        ast_km, leg_diag = astar_tour_length(tuple(drv["current_location"]), ordered_drops)
+        vr_cfg = VRPTWConfig()
+        dij_km, ast_km, leg_diag, eta_min = cluster_route_graph_metrics(
+            tuple(drv["current_location"]), ordered_drops, vr_cfg=vr_cfg
+        )
         leg_equal = all(abs(d[2]) <= 1e-9 for d in leg_diag)
 
         ok, detail = validate_route_feasibility(
@@ -227,7 +269,7 @@ def run_optimized_routes(
             ordered_drops,
             metas,
             float(drv["capacity"]),
-            VRPTWConfig(),
+            vr_cfg,
         )
 
         osrm_road_km: float | None = None
@@ -260,7 +302,7 @@ def run_optimized_routes(
         eff_km, eff_min, eff_dist_src, eff_time_src = _effective_metrics_for_route(
             osrm_road_km=osrm_road_km,
             osrm_duration_min=osrm_duration_min,
-            astar_leg_km=ast_km,
+            dijkstra_graph_km=dij_km,
             ga_tour_km=ga_km,
         )
 
@@ -272,7 +314,9 @@ def run_optimized_routes(
                 drop_coords_ordered=ordered_drops,
                 metas_ordered=metas,
                 ga_tour_km=ga_km,
+                dijkstra_graph_km=dij_km,
                 astar_leg_km=ast_km,
+                eta_arrival_min=eta_min,
                 dijkstra_star_equal=leg_equal,
                 vrptw_ok=ok,
                 vrptw_detail=detail,
@@ -318,19 +362,24 @@ def summarize_savings(
     drivers: list[dict[str, Any]],
     route_results: list[RouteResult],
 ) -> dict[str, float]:
-    """Compare naive independent legs vs. optimized chained tours (GA + A*)."""
+    """Compare naive independent legs vs. optimized chained tours (GA + graph legs)."""
     merged, _ = merge_same_location_orders(orders)
     naive_km = naive_independent_legs_km(merged, drivers)
     opt_ga_km = sum(r.ga_tour_km for r in route_results)
+    opt_dij_km = sum(r.dijkstra_graph_km for r in route_results)
     opt_ast_km = sum(r.astar_leg_km for r in route_results)
     osrm_values = [r.osrm_road_km for r in route_results if r.osrm_road_km is not None]
     opt_osrm_km = sum(osrm_values) if len(osrm_values) == len(route_results) and route_results else 0.0
     return {
         "naive_sum_legs_km": naive_km,
         "optimized_ga_open_tour_km": opt_ga_km,
-        "optimized_astar_graph_km": opt_ast_km,
+        "optimized_dijkstra_graph_km": opt_dij_km,
+        "optimized_astar_quick_km": opt_ast_km,
+        # Historic key: graph-chain km (now Dijkstra SP on cluster graph; equals A* when legs match).
+        "optimized_astar_graph_km": opt_dij_km,
         "optimized_osrm_road_km": opt_osrm_km,
         "saved_km_vs_naive_ga": max(0.0, naive_km - opt_ga_km),
+        "saved_km_vs_naive_dijkstra": max(0.0, naive_km - opt_dij_km),
         "saved_km_vs_naive_astar": max(0.0, naive_km - opt_ast_km),
         "saved_km_vs_naive_osrm": max(0.0, naive_km - opt_osrm_km) if opt_osrm_km else 0.0,
     }

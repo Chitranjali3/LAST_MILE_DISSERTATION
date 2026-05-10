@@ -69,7 +69,7 @@ def test_use_osrm_off_runs_core_only(small_problem):
     for r in results:
         assert r.osrm_status == "not_requested"
         assert r.osrm_road_km is None
-        assert r.effective_distance_source in {"astar", "ga_proxy"}
+        assert r.effective_distance_source in {"dijkstra", "ga_proxy"}
         assert r.effective_time_source == "proxy"
         assert r.effective_distance_km > 0.0
         assert r.effective_duration_min is not None and r.effective_duration_min > 0.0
@@ -141,7 +141,7 @@ def test_use_osrm_on_with_server_down_at_start(small_problem, monkeypatch):
     for r in results:
         assert r.osrm_status.startswith("unavailable")
         assert r.osrm_road_km is None
-        assert r.effective_distance_source in {"astar", "ga_proxy"}
+        assert r.effective_distance_source in {"dijkstra", "ga_proxy"}
         assert r.effective_time_source == "proxy"
 
 
@@ -187,7 +187,7 @@ def test_use_osrm_mid_run_failure_partial_enrichment(small_problem, monkeypatch)
     assert len(fallback_routes) == len(results) - 1
     for r in fallback_routes:
         assert r.osrm_status.startswith("unavailable")
-        assert r.effective_distance_source in {"astar", "ga_proxy"}
+        assert r.effective_distance_source in {"dijkstra", "ga_proxy"}
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +272,16 @@ def test_select_route_polyline_falls_back_when_osrm_geometry_degenerate():
 
     no_geometry = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
-        metas_ordered=[], ga_tour_km=1.0, astar_leg_km=1.0, dijkstra_star_equal=True,
+        metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={}, osrm_geometry=None,
     )
     assert select_route_polyline(no_geometry, driver_start) == fallback
 
     degenerate_geometry = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
-        metas_ordered=[], ga_tour_km=1.0, astar_leg_km=1.0, dijkstra_star_equal=True,
+        metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={},
         osrm_geometry=[driver_start, driver_start],  # zero-length artifact
     )
@@ -292,7 +294,8 @@ def test_select_route_polyline_falls_back_when_osrm_geometry_degenerate():
     ]
     valid = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
-        metas_ordered=[], ga_tour_km=1.0, astar_leg_km=1.0, dijkstra_star_equal=True,
+        metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={}, osrm_geometry=real_geometry,
     )
     assert select_route_polyline(valid, driver_start) == real_geometry

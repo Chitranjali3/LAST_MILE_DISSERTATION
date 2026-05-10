@@ -16,7 +16,7 @@ from typing import Any
 
 from core.batching import merge_same_location_orders
 from core.ga_optimizer import optimize_route_ga, tour_distance_km
-from core.routing import astar_tour_length, naive_independent_legs_km
+from core.routing import cluster_route_graph_metrics, naive_independent_legs_km
 from utils import ODISHA_REGION_CENTER, haversine_km, synthetic_drivers, synthetic_orders
 
 
@@ -52,10 +52,12 @@ def scenario_collinear_intermediate() -> dict[str, Any]:
     perm, _fit = optimize_route_ga(coords, driver, generations=90, pop_size=120, seed=3)
     chained = tour_distance_km(perm, coords, driver)
     fragmented = haversine_km(driver, A) + haversine_km(driver, C) + haversine_km(driver, B)
-    ast_km, _ = astar_tour_length(driver, [coords[i] for i in perm])
+    ordered = [coords[i] for i in perm]
+    dij_km, ast_km, _, _ = cluster_route_graph_metrics(driver, ordered)
     return {
         "best_perm_indices": perm,
         "open_tour_km": chained,
+        "dijkstra_chain_km": dij_km,
         "astar_chain_km": ast_km,
         "sum_independent_one_way_km": fragmented,
         "improvement_km": max(0.0, fragmented - chained),

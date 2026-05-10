@@ -28,6 +28,13 @@ from map_basemap import normalize_viz_mode, pad_lonlat_extent, try_osm_basemap
 from utils import ODISHA_REGION_CENTER, synthetic_drivers, synthetic_orders
 
 
+def _fmt_clock(mins_since_midnight: float) -> str:
+    total = max(0, int(round(mins_since_midnight)))
+    hh = (total // 60) % 24
+    mm = total % 60
+    return f"{hh:02d}:{mm:02d}"
+
+
 def _osrm_status_label(osrm_info: dict[str, Any]) -> str:
     """Compact human-readable summary of the OSRM pipeline state."""
     if not osrm_info.get("requested"):
@@ -262,7 +269,8 @@ class VisualOsrmApp:
         summary = (
             f"Routes: {len(results)} | "
             f"GA: {savings['optimized_ga_open_tour_km']:.2f} km | "
-            f"A*: {savings['optimized_astar_graph_km']:.2f} km | "
+            f"Dijkstra: {savings['optimized_dijkstra_graph_km']:.2f} km | "
+            f"A* quick: {savings['optimized_astar_quick_km']:.2f} km | "
             f"OSRM: {savings['optimized_osrm_road_km']:.2f} km | "
             f"{status_label} | counts: {status_counts}"
         )
@@ -275,6 +283,16 @@ class VisualOsrmApp:
         path = self.out_dir / "output_osrm_visual_process.png"
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.show(block=False)
+        eta_lines: list[str] = ["ETA per order:"]
+        for route in results:
+            if not route.metas_ordered:
+                continue
+            anchor_min = min(float(m["time_window"][0]) for m in route.metas_ordered)
+            eta_lines.append(f"D{route.driver_id}/C{route.cluster_id}")
+            for meta, eta_rel in zip(route.metas_ordered, route.eta_arrival_min, strict=False):
+                order_id = int(meta.get("order_id", -1))
+                eta_abs = anchor_min + float(eta_rel)
+                eta_lines.append(f"  O{order_id}: {_fmt_clock(eta_abs)} (+{eta_rel:.1f}m)")
         self._write_info(
             [
                 "Pipeline complete.",
@@ -284,6 +302,8 @@ class VisualOsrmApp:
                 f"Saved: {path.name}",
                 "",
                 summary,
+                "",
+                *eta_lines,
             ]
         )
         self.fig.canvas.draw_idle()
@@ -381,6 +401,23 @@ class VisualOsrmApp:
                 label=f"D{route.driver_id}/C{route.cluster_id}",
                 zorder=5,
             )
+            if route.metas_ordered and route.eta_arrival_min:
+                anchor_min = min(float(m["time_window"][0]) for m in route.metas_ordered)
+                for stop_idx, (coord, meta, eta_rel) in enumerate(
+                    zip(route.drop_coords_ordered, route.metas_ordered, route.eta_arrival_min, strict=False)
+                ):
+                    lat, lon = coord
+                    order_id = int(meta.get("order_id", stop_idx + 1))
+                    eta_abs = anchor_min + float(eta_rel)
+                    ax.annotate(
+                        f"O{order_id} ETA {_fmt_clock(eta_abs)}",
+                        (lon, lat),
+                        xytext=(5, 5),
+                        textcoords="offset points",
+                        fontsize=7.5,
+                        bbox={"boxstyle": "round,pad=0.2", "fc": "white", "alpha": 0.75, "ec": "none"},
+                        zorder=7,
+                    )
         self._finish_map_axis(ax, grid=not had_bm)
 
     @staticmethod
