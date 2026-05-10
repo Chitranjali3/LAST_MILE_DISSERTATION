@@ -10,8 +10,16 @@ Visual walkthrough:
 
     python main.py --present [--pause SECONDS] [--viz-mode graph|map]
 
+CSV inputs (orders + drivers together; see ``data/sample_orders.csv`` and ``data/sample_drivers.csv``):
+
+    python main.py --orders-csv data/sample_orders.csv --drivers-csv data/sample_drivers.csv
+    python main.py --visual-input --orders-csv data/sample_orders.csv --drivers-csv data/sample_drivers.csv
+
 Set Last-Mile_HEADLESS=1 to save step PNGs without blocking on windows (CI / SSH).
 CHITRA_VIZ_MODE=graph|map sets default for --viz-mode when omitted.
+
+Each completed CLI or visual pipeline writes timestamped mates under ``output/csv``, ``output/json``,
+and ``output/images`` (figures share the same ``<stamp>`` as CSV/JSON on CLI runs).
 """
 
 from __future__ import annotations
@@ -23,6 +31,16 @@ from pathlib import Path
 
 from map_basemap import normalize_viz_mode
 
+from pipeline_csv_log import (
+    build_pipeline_report_dict,
+    new_run_stamp_utc,
+    output_csv_dir,
+    output_images_dir,
+    output_json_dir,
+    save_pipeline_report_json,
+    write_pipeline_run_csv,
+)
+
 from core.batching import merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
@@ -30,25 +48,13 @@ from core.routing import run_optimized_routes, select_route_polyline, summarize_
 from simulator import run_all as run_simulations
 from utils import (
     haversine_km,
+    load_drivers_csv,
+    load_orders_csv,
     plot_before_after,
     plot_clusters_and_routes,
     synthetic_drivers,
     synthetic_orders,
 )
-
-
-def _format_grouping(merged: list[dict]) -> list[dict]:
-    rows = []
-    for m in merged:
-        rows.append(
-            {
-                "representative_order_id": m["order_id"],
-                "merged_order_ids": m.get("merged_order_ids", [m["order_id"]]),
-                "weight_kg": m["parcel_weight"],
-                "drop": m["drop"],
-            }
-        )
-    return rows
 
 
 def haversine_proxy(d: dict, drop: tuple[float, float]) -> float:
@@ -100,7 +106,34 @@ def main() -> None:
         default=normalize_viz_mode(os.environ.get("CHITRA_VIZ_MODE")),
         help='Plots: "graph" = grid-only lon/lat; "map" = OSM tiles when possible (default from CHITRA_VIZ_MODE or map).',
     )
+    parser.add_argument(
+        "--orders-csv",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Load orders from CSV (requires --drivers-csv). Schema: data/sample_orders.csv",
+    )
+    parser.add_argument(
+        "--drivers-csv",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Load drivers from CSV (requires --orders-csv). Schema: data/sample_drivers.csv",
+    )
     args = parser.parse_args()
+
+    use_csv = args.orders_csv is not None or args.drivers_csv is not None
+    if use_csv and (args.orders_csv is None or args.drivers_csv is None):
+        parser.error("--orders-csv and --drivers-csv must be given together")
+
+    csv_orders: list | None = None
+    csv_drivers: list | None = None
+    if use_csv:
+        try:
+            csv_orders = load_orders_csv(args.orders_csv)
+            csv_drivers = load_drivers_csv(args.drivers_csv)
+        except (OSError, ValueError) as e:
+            parser.error(str(e))
 
     out_dir = Path(__file__).resolve().parent
     if args.visual_input:
@@ -111,16 +144,26 @@ def main() -> None:
             out_dir=out_dir,
             viz_mode=args.viz_mode,
             initial_use_vrptw=args.use_vrptw,
+            initial_orders=csv_orders,
+            initial_drivers=csv_drivers,
         )
         return
 
-    orders = synthetic_orders(26, seed=42)
-    drivers = synthetic_drivers(5, seed=42)
+    if use_csv:
+        orders = csv_orders
+        drivers = csv_drivers
+    else:
+        orders = synthetic_orders(26, seed=42)
+        drivers = synthetic_drivers(5, seed=42)
 
     if args.use_osrm:
         print(f"OSRM: requested at {args.osrm_url} (preflight pending...)")
     else:
         print("OSRM: not requested (pass --use-osrm to enable road enrichment)")
+
+    dbscan_eps_km = 1.4
+    run_stamp = new_run_stamp_utc()
+    imgs_dir = output_images_dir(out_dir)
 
     if args.present:
         from visual_presenter import present_full_pipeline
@@ -128,28 +171,45 @@ def main() -> None:
         results, savings, merged, labels, assignment, pipeline_info = present_full_pipeline(
             orders,
             drivers,
-            dbscan_eps_km=1.4,
+            dbscan_eps_km=dbscan_eps_km,
             pause_seconds=args.pause,
             out_dir=out_dir,
             use_osrm=args.use_osrm,
             osrm_base_url=args.osrm_url,
             viz_mode=args.viz_mode,
             use_vrptw=args.use_vrptw,
+            artifact_stamp=run_stamp,
         )
     else:
         merged, _ = merge_same_location_orders(orders)
-        labels, _ = cluster_deliveries_dbscan(merged, eps_km=1.4, min_samples=2)
+        labels, _ = cluster_deliveries_dbscan(merged, eps_km=dbscan_eps_km, min_samples=2)
         clusters = stops_by_cluster(labels)
         assignment = assign_nearest_driver(clusters, merged, drivers)
         results, pipeline_info = run_optimized_routes(
             orders,
             drivers,
-            dbscan_eps_km=1.4,
+            dbscan_eps_km=dbscan_eps_km,
             use_osrm=args.use_osrm,
             osrm_base_url=args.osrm_url,
             use_vrptw=args.use_vrptw,
         )
         savings = summarize_savings(orders, drivers, results)
+
+    csv_written = write_pipeline_run_csv(
+        output_csv_dir(out_dir) / f"pipeline_run_{run_stamp}.csv",
+        source="cli_main",
+        orders=orders,
+        drivers=drivers,
+        merged=merged,
+        labels=labels,
+        assignment=assignment,
+        results=results,
+        savings=savings,
+        pipeline_info=pipeline_info,
+        dbscan_eps_km=dbscan_eps_km,
+        use_osrm=args.use_osrm,
+    )
+    print(f"Pipeline CSV written: {csv_written}")
 
     osrm_info = pipeline_info.get("osrm", {})
     if args.use_osrm:
@@ -168,12 +228,13 @@ def main() -> None:
         routes_for_plot.append(select_route_polyline(r, tuple(drv["current_location"])))
 
     drops = [tuple(s["drop"]) for s in merged]
+    clusters_png = imgs_dir / f"clusters_routes_{run_stamp}.png"
     plot_clusters_and_routes(
         drops,
         labels,
         routes_for_plot,
         title="DBSCAN clusters and optimized driver routes",
-        save_path=str(out_dir / "output_clusters_routes.png"),
+        save_path=str(clusters_png),
         viz_mode=args.viz_mode,
     )
 
@@ -183,69 +244,38 @@ def main() -> None:
         best_drv = min(drivers, key=lambda d: haversine_proxy(d, drop))
         naive_segments.append((tuple(best_drv["current_location"]), drop))
 
+    before_after_png = imgs_dir / f"before_after_{run_stamp}.png"
     plot_before_after(
         naive_segments,
         routes_for_plot,
-        save_path=str(out_dir / "output_before_after.png"),
+        save_path=str(before_after_png),
         viz_mode=args.viz_mode,
     )
 
-    report = {
-        "clustered_deliveries": {
-            "n_merged_stops": len(merged),
-            "cluster_labels": labels.tolist(),
-            "driver_assignment_by_cluster": {str(k): v for k, v in assignment.items()},
-        },
-        "optimized_routes": [
-            {
-                "cluster_id": r.cluster_id,
-                "driver_id": r.driver_id,
-                "stop_sequence": r.stop_order_local,
-                "ga_open_tour_km": r.ga_tour_km,
-                "dijkstra_graph_km": r.dijkstra_graph_km,
-                "astar_fastest_route_km": r.astar_leg_km,
-                "astar_fastest_route_min": r.astar_leg_min,
-                "eta_arrival_min_from_departure": r.eta_arrival_min,
-                "osrm_road_km": r.osrm_road_km,
-                "osrm_duration_min": r.osrm_duration_min,
-                "osrm_status": r.osrm_status,
-                "effective_distance_km": r.effective_distance_km,
-                "effective_duration_min": r.effective_duration_min,
-                "effective_distance_source": r.effective_distance_source,
-                "effective_time_source": r.effective_time_source,
-                "dijkstra_equals_astar_distance_legs": r.dijkstra_star_equal,
-                "vrptw_ok": r.vrptw_ok,
-                "vrptw": r.vrptw_detail,
-            }
-            for r in results
-        ],
-        "totals": savings,
-        "delivery_grouping": _format_grouping(merged),
-        "comparison_naive_vs_optimized": {
-            "naive_sum_independent_legs_km": savings["naive_sum_legs_km"],
-            "optimized_ga_km": savings["optimized_ga_open_tour_km"],
-            "optimized_dijkstra_graph_km": savings["optimized_dijkstra_graph_km"],
-            "optimized_astar_quick_km": savings["optimized_astar_quick_km"],
-            "optimized_astar_km": savings["optimized_astar_graph_km"],
-            "optimized_osrm_road_km": savings["optimized_osrm_road_km"],
-            "km_saved_ga": savings["saved_km_vs_naive_ga"],
-            "km_saved_dijkstra": savings["saved_km_vs_naive_dijkstra"],
-            "km_saved_astar": savings["saved_km_vs_naive_astar"],
-            "km_saved_osrm": savings["saved_km_vs_naive_osrm"],
-        },
-        "simulations": sim_pack,
-        "pipeline": pipeline_info,
-    }
+    report = build_pipeline_report_dict(
+        merged=merged,
+        labels=labels,
+        assignment=assignment,
+        results=results,
+        savings=savings,
+        pipeline_info=pipeline_info,
+        run_stamp=run_stamp,
+        run_source="cli_main",
+        simulations=sim_pack,
+    )
+    json_written = output_json_dir(out_dir) / f"pipeline_run_{run_stamp}.json"
+    save_pipeline_report_json(json_written, report)
 
     print(json.dumps(report, indent=2, default=str))
-    print("\nFigures written:", out_dir / "output_clusters_routes.png", out_dir / "output_before_after.png")
+    print("\nPipeline JSON written:", json_written)
+    print("\nFigures written:", clusters_png, before_after_png)
     if args.use_osrm:
         enriched = osrm_info.get("enriched_routes", 0)
         total = osrm_info.get("total_routes", len(results))
         print(f"OSRM enriched routes: {enriched}/{total}")
     if args.present:
-        slides = sorted(out_dir.glob("output_pipeline_*.png"))
-        print(f"Presenter step frames: {len(slides)} files (output_pipeline_##_*.png)")
+        slides = sorted(imgs_dir.glob(f"pipeline_present_{run_stamp}_*.png"))
+        print(f"Presenter step frames: {len(slides)} files under output/images (pipeline_present_{run_stamp}_##_*.png)")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Shows each major processing stage (batching/clustering/assignment/GA-A*/VRPTW/ou
 then leaves a final metrics panel. Intended for demos and dissertation walkthroughs.
 
 Non-interactive / headless: set environment variable Last-Mile_HEADLESS=1 to skip blocking
-plt.show() waits and instead write output_pipeline_steps.png frames.
+plt.show() waits and instead write step frames under ``output/images/pipeline_present_<stamp>_##_*.png``.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
 from core.routing import RouteResult, run_optimized_routes, summarize_savings
 from map_basemap import pad_lonlat_extent, try_osm_basemap
+from pipeline_csv_log import new_run_stamp_utc, output_images_dir
+
 from utils import haversine_km, synthetic_drivers, synthetic_orders
 
 
@@ -34,6 +36,8 @@ class PresenterConfig:
     out_dir: Path | None = None
     headless: bool = False
     viz_mode: str = "map"
+    # Shared with CSV/JSON when driven from ``main.py --present``.
+    artifact_stamp: str | None = None
 
 
 def _is_headless() -> bool:
@@ -53,6 +57,7 @@ class PipelineVisualizer:
             plt.ion()
         self._fig = plt.figure(figsize=(12.5, 7.2), constrained_layout=False)
         self._frames_saved = 0
+        self._session_stamp = cfg.artifact_stamp or new_run_stamp_utc()
 
     def _step_header(self, step: str, subtitle: str) -> None:
         self._fig.clf()
@@ -130,7 +135,8 @@ class PipelineVisualizer:
     def _flush(self, tag: str) -> None:
         self._fig.canvas.draw()
         self._fig.canvas.flush_events()
-        path = self.out_dir / f"output_pipeline_{self._frames_saved:02d}_{tag}.png"
+        img_dir = output_images_dir(self.out_dir)
+        path = img_dir / f"pipeline_present_{self._session_stamp}_{self._frames_saved:02d}_{tag}.png"
         self._fig.savefig(path, dpi=140, bbox_inches="tight")
         self._frames_saved += 1
         if self.cfg.headless or _is_headless():
@@ -479,6 +485,7 @@ def present_full_pipeline(
     osrm_base_url: str = "http://localhost:5000",
     viz_mode: str = "map",
     use_vrptw: bool = False,
+    artifact_stamp: str | None = None,
 ) -> tuple[list[RouteResult], dict[str, float], list[dict[str, Any]], np.ndarray, dict[int, int], dict[str, Any]]:
     """Run slideshow + optimization once; returns (results, savings, merged, labels, assignment, grouping meta)."""
     cfg = PresenterConfig(
@@ -486,6 +493,7 @@ def present_full_pipeline(
         out_dir=out_dir,
         headless=headless if headless is not None else _is_headless(),
         viz_mode=viz_mode,
+        artifact_stamp=artifact_stamp,
     )
     viz = PipelineVisualizer(cfg)
 

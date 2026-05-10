@@ -6,8 +6,10 @@ Includes geodesic distance, synthetic data generation, and plotting helpers.
 
 from __future__ import annotations
 
+import csv
 import math
 import random
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -148,6 +150,169 @@ def synthetic_drivers(
                 "capacity": rng.choice([20, 25, 30, 35]),
             }
         )
+    return drivers
+
+
+def _strip_header(name: str) -> str:
+    return name.lstrip("\ufeff").strip()
+
+
+def _parse_csv_cell_float(key: str, raw: str, *, path: Path, row_num: int) -> float:
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError(f"{path!s} row {row_num}: empty value for {key!r}")
+    try:
+        return float(s)
+    except ValueError as e:
+        raise ValueError(f"{path!s} row {row_num}: invalid float for {key!r}: {raw!r}") from e
+
+
+def _parse_csv_cell_int(key: str, raw: str, *, path: Path, row_num: int) -> int:
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError(f"{path!s} row {row_num}: empty value for {key!r}")
+    try:
+        return int(float(s))
+    except ValueError as e:
+        raise ValueError(f"{path!s} row {row_num}: invalid int for {key!r}: {raw!r}") from e
+
+
+def load_orders_csv(path: str | Path) -> list[dict[str, Any]]:
+    """Load orders from CSV into the dict shape used by merge/routing.
+
+    Required columns:
+      order_id, user_id, pickup_lat, pickup_lon, drop_lat, drop_lon,
+      tw_start_min, tw_end_min, parcel_weight
+
+    Optional column (exactly nine core columns OR add as tenth column):
+      preferred_minute — minutes from midnight (VRPTW ordering); leave blank to omit.
+
+    Coordinates are (lat, lon) in WGS84; sample files cluster around ``ODISHA_REGION_CENTER``.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"orders CSV not found: {p}")
+
+    expected_core = (
+        "order_id",
+        "user_id",
+        "pickup_lat",
+        "pickup_lon",
+        "drop_lat",
+        "drop_lon",
+        "tw_start_min",
+        "tw_end_min",
+        "parcel_weight",
+    )
+    pref_name = "preferred_minute"
+    orders: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
+    with p.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError(f"{p}: missing header row")
+        headers = [_strip_header(h) for h in reader.fieldnames if h is not None]
+        has_pref_col: bool
+        if headers == list(expected_core):
+            has_pref_col = False
+        elif headers == list(expected_core) + [pref_name]:
+            has_pref_col = True
+        else:
+            raise ValueError(
+                f"{p}: expected header {list(expected_core)!r} "
+                f"or {list(expected_core) + [pref_name]!r}, got {headers!r}"
+            )
+
+        for row_num, raw in enumerate(reader, start=2):
+            row = {_strip_header(k): (v.strip() if v else "") for k, v in raw.items() if k is not None}
+            if not row or all(not v for v in row.values()):
+                continue
+            oid = _parse_csv_cell_int("order_id", row.get("order_id", ""), path=p, row_num=row_num)
+            if oid in seen_ids:
+                raise ValueError(f"{p} row {row_num}: duplicate order_id {oid}")
+            seen_ids.add(oid)
+            uid = _parse_csv_cell_int("user_id", row.get("user_id", ""), path=p, row_num=row_num)
+            plat = _parse_csv_cell_float("pickup_lat", row.get("pickup_lat", ""), path=p, row_num=row_num)
+            plon = _parse_csv_cell_float("pickup_lon", row.get("pickup_lon", ""), path=p, row_num=row_num)
+            dlat = _parse_csv_cell_float("drop_lat", row.get("drop_lat", ""), path=p, row_num=row_num)
+            dlon = _parse_csv_cell_float("drop_lon", row.get("drop_lon", ""), path=p, row_num=row_num)
+            tw0 = _parse_csv_cell_int("tw_start_min", row.get("tw_start_min", ""), path=p, row_num=row_num)
+            tw1 = _parse_csv_cell_int("tw_end_min", row.get("tw_end_min", ""), path=p, row_num=row_num)
+            if tw0 > tw1:
+                raise ValueError(
+                    f"{p} row {row_num}: tw_start_min ({tw0}) must be <= tw_end_min ({tw1})"
+                )
+            weight = _parse_csv_cell_float(
+                "parcel_weight", row.get("parcel_weight", ""), path=p, row_num=row_num
+            )
+            rec: dict[str, Any] = {
+                "order_id": oid,
+                "user_id": uid,
+                "pickup": (plat, plon),
+                "drop": (dlat, dlon),
+                "time_window": [float(tw0), float(tw1)],
+                "parcel_weight": weight,
+            }
+            if has_pref_col:
+                pref_raw = row.get(pref_name, "")
+                if pref_raw:
+                    pm = _parse_csv_cell_int(pref_name, pref_raw, path=p, row_num=row_num)
+                    if not (0 <= pm < 24 * 60):
+                        raise ValueError(
+                            f"{p} row {row_num}: preferred_minute must be in [0, 1439], got {pm}"
+                        )
+                    rec["preferred_minute"] = float(pm)
+            orders.append(rec)
+
+    if not orders:
+        raise ValueError(f"{p}: no data rows after header")
+    orders.sort(key=lambda o: int(o["order_id"]))
+    return orders
+
+
+def load_drivers_csv(path: str | Path) -> list[dict[str, Any]]:
+    """Load drivers from CSV: driver_id, current_lat, current_lon, capacity."""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"drivers CSV not found: {p}")
+
+    expected = ("driver_id", "current_lat", "current_lon", "capacity")
+    drivers: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
+    with p.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError(f"{p}: missing header row")
+        headers = [_strip_header(h) for h in reader.fieldnames]
+        if headers != list(expected):
+            raise ValueError(f"{p}: expected header {list(expected)!r}, got {headers!r}")
+
+        for row_num, raw in enumerate(reader, start=2):
+            row = {_strip_header(k): (v.strip() if v else "") for k, v in raw.items() if k is not None}
+            if not row or all(not v for v in row.values()):
+                continue
+            did = _parse_csv_cell_int("driver_id", row.get("driver_id", ""), path=p, row_num=row_num)
+            if did in seen_ids:
+                raise ValueError(f"{p} row {row_num}: duplicate driver_id {did}")
+            seen_ids.add(did)
+            lat = _parse_csv_cell_float("current_lat", row.get("current_lat", ""), path=p, row_num=row_num)
+            lon = _parse_csv_cell_float("current_lon", row.get("current_lon", ""), path=p, row_num=row_num)
+            cap = _parse_csv_cell_float("capacity", row.get("capacity", ""), path=p, row_num=row_num)
+            if cap <= 0:
+                raise ValueError(f"{p} row {row_num}: capacity must be positive, got {cap}")
+            drivers.append(
+                {
+                    "driver_id": did,
+                    "current_location": (lat, lon),
+                    "capacity": cap,
+                }
+            )
+
+    if not drivers:
+        raise ValueError(f"{p}: no data rows after header")
+    drivers.sort(key=lambda d: int(d["driver_id"]))
     return drivers
 
 

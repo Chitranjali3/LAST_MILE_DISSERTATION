@@ -1,0 +1,162 @@
+{
+  "run_stamp_utc": "20260510_170922_424200",
+  "run_source": "visual_osrm_app",
+  "clustered_deliveries": {
+    "n_merged_stops": 3,
+    "cluster_labels": [
+      1,
+      0,
+      0
+    ],
+    "driver_assignment_by_cluster": {
+      "0": 1,
+      "1": 2
+    }
+  },
+  "optimized_routes": [
+    {
+      "cluster_id": 0,
+      "driver_id": 1,
+      "stop_sequence": [
+        0,
+        1
+      ],
+      "ga_open_tour_km": 1.4063494560582437,
+      "dijkstra_graph_km": 1.4063494560582437,
+      "astar_fastest_route_km": 1.5450055818741015,
+      "astar_fastest_route_min": 3.8926061571357176,
+      "eta_arrival_min_from_departure": [
+        1.2881074794474907,
+        8.892606157135717
+      ],
+      "osrm_road_km": 8.1527,
+      "osrm_duration_min": 12.545,
+      "osrm_status": "ok",
+      "effective_distance_km": 8.1527,
+      "effective_duration_min": 12.545,
+      "effective_distance_source": "osrm",
+      "effective_time_source": "osrm",
+      "dijkstra_equals_astar_distance_legs": false,
+      "vrptw_ok": true,
+      "vrptw": {
+        "end_time_min": 35.0,
+        "max_load": 2.0,
+        "violations": []
+      }
+    },
+    {
+      "cluster_id": 1,
+      "driver_id": 2,
+      "stop_sequence": [
+        0
+      ],
+      "ga_open_tour_km": 0.13985088915949584,
+      "dijkstra_graph_km": 0.13985088915949584,
+      "astar_fastest_route_km": 0.13985088915949584,
+      "astar_fastest_route_min": 1.643184621134223,
+      "eta_arrival_min_from_departure": [
+        1.643184621134223
+      ],
+      "osrm_road_km": 0.21130000000000002,
+      "osrm_duration_min": 0.66,
+      "osrm_status": "ok",
+      "effective_distance_km": 0.21130000000000002,
+      "effective_duration_min": 0.66,
+      "effective_distance_source": "osrm",
+      "effective_time_source": "osrm",
+      "dijkstra_equals_astar_distance_legs": true,
+      "vrptw_ok": true,
+      "vrptw": {
+        "end_time_min": 5.33564213398279,
+        "max_load": 1.0,
+        "violations": []
+      }
+    }
+  ],
+  "totals": {
+    "naive_sum_legs_km": 1.3902380980220035,
+    "optimized_ga_open_tour_km": 1.5462003452177395,
+    "optimized_dijkstra_graph_km": 1.5462003452177395,
+    "optimized_astar_quick_km": 1.6848564710335974,
+    "optimized_astar_graph_km": 1.5462003452177395,
+    "optimized_osrm_road_km": 8.363999999999999,
+    "saved_km_vs_naive_ga": 0.0,
+    "saved_km_vs_naive_dijkstra": 0.0,
+    "saved_km_vs_naive_astar": 0.0,
+    "saved_km_vs_naive_osrm": 0.0
+  },
+  "delivery_grouping": [
+    {
+      "representative_order_id": 1,
+      "merged_order_ids": [
+        1
+      ],
+      "weight_kg": 1.0,
+      "drop": [
+        20.358564387464387,
+        85.79761253561254
+      ]
+    },
+    {
+      "representative_order_id": 2,
+      "merged_order_ids": [
+        2
+      ],
+      "weight_kg": 1.0,
+      "drop": [
+        20.370137037037036,
+        85.81603133903134
+      ]
+    },
+    {
+      "representative_order_id": 3,
+      "merged_order_ids": [
+        3
+      ],
+      "weight_kg": 1.0,
+      "drop": [
+        20.374795744149807,
+        85.82287903608737
+      ]
+    }
+  ],
+  "comparison_naive_vs_optimized": {
+    "naive_sum_independent_legs_km": 1.3902380980220035,
+    "optimized_ga_km": 1.5462003452177395,
+    "optimized_dijkstra_graph_km": 1.5462003452177395,
+    "optimized_astar_quick_km": 1.6848564710335974,
+    "optimized_astar_km": 1.5462003452177395,
+    "optimized_osrm_road_km": 8.363999999999999,
+    "km_saved_ga": 0.0,
+    "km_saved_dijkstra": 0.0,
+    "km_saved_astar": 0.0,
+    "km_saved_osrm": 0.0
+  },
+  "pipeline": {
+    "merged_stop_count": 3,
+    "clusters": 2,
+    "merge_map": {
+      "1": 1,
+      "2": 2,
+      "3": 3
+    },
+    "osrm": {
+      "requested": true,
+      "base_url": "http://localhost:5001",
+      "connected": true,
+      "mode": "core_plus_osrm",
+      "reason": "connected",
+      "status_counts": {
+        "ok": 2
+      },
+      "enriched_routes": 2,
+      "total_routes": 2
+    },
+    "vrptw": {
+      "enabled": true,
+      "feasible_routes": 2,
+      "total_routes": 2
+    }
+  },
+  "simulations": null
+}

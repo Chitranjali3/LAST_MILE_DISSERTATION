@@ -3,6 +3,7 @@ Click-based visual input/process/output app for Last-Mile + OSRM.
 
 Run with:
     python main.py --visual-input [--viz-mode graph|map] [--use-vrptw]
+    python main.py --visual-input --orders-csv data/sample_orders.csv --drivers-csv data/sample_drivers.csv
 
 Controls:
     - Click "Driver mode", then click the map to add driver start points.
@@ -11,7 +12,8 @@ Controls:
       ON, every new order prompts for a preferred delivery time (HH:MM) and
       the GA orders stops by their windows even when a later-windowed customer
       is geographically closer to the driver.
-    - Click "Run pipeline" to see input, clustering/assignment, and route output.
+    - Click "Run pipeline" to see input, clustering/assignment, and route output
+      (writes ``output/csv/``, ``output/json/``, and ``output/images/osrm_visual_process_<stamp>.png``).
     - Use "View: OSM" / "View: grid" to switch map tiles vs grid-only (also ``--viz-mode``).
 """
 
@@ -28,6 +30,15 @@ from core.batching import merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
 from core.routing import RouteResult, run_optimized_routes, select_route_polyline, summarize_savings
+from pipeline_csv_log import (
+    build_pipeline_report_dict,
+    new_run_stamp_utc,
+    output_csv_dir,
+    output_images_dir,
+    output_json_dir,
+    save_pipeline_report_json,
+    write_pipeline_run_csv,
+)
 from map_basemap import normalize_viz_mode, pad_lonlat_extent, try_osm_basemap
 from utils import ODISHA_REGION_CENTER, synthetic_drivers, synthetic_orders
 
@@ -36,6 +47,9 @@ from utils import ODISHA_REGION_CENTER, synthetic_drivers, synthetic_orders
 # enough to make ordering pressure visible in the GA; wide enough that small
 # travel-time mis-estimates don't immediately mark the route infeasible.
 _VRPTW_WINDOW_HALF_MIN: float = 30.0
+
+# Keep in sync with ``main.py`` / ``run_optimized_routes`` clustering defaults.
+_DBSCAN_EPS_KM: float = 1.4
 
 
 def _parse_clock_to_minutes(text: str | None) -> int | None:
@@ -123,6 +137,8 @@ class VisualOsrmApp:
         *,
         viz_mode: str = "map",
         initial_use_vrptw: bool = False,
+        initial_orders: list[dict[str, Any]] | None = None,
+        initial_drivers: list[dict[str, Any]] | None = None,
     ) -> None:
         self.osrm_base_url = osrm_base_url
         self.out_dir = out_dir or Path(__file__).resolve().parent
@@ -179,6 +195,13 @@ class VisualOsrmApp:
         # avoids the macOS `macosx`-backend segfault that triggers when a
         # second figure's event loop is started from inside a callback.
         self._build_pending_overlay()
+
+        if initial_orders is None and initial_drivers is None:
+            pass
+        elif initial_orders is not None and initial_drivers is not None:
+            self._set_orders_and_drivers(initial_orders, initial_drivers)
+        else:
+            raise ValueError("initial_orders and initial_drivers must both be provided or both omitted")
 
         self._redraw_input()
 
@@ -352,19 +375,29 @@ class VisualOsrmApp:
         self.mode = mode
         self._redraw_input()
 
-    def _load_sample(self) -> None:
-        self.orders = synthetic_orders(18, seed=8)
-        self.drivers = synthetic_drivers(4, seed=8)
-        # Sample orders never carry a manually-chosen ``preferred_minute``.
-        # Their built-in ``time_window`` ranges still drive VRPTW logic when
-        # the toggle is on, but no fake "preferred time" is invented here.
-        self._next_order_id = max(int(o["order_id"]) for o in self.orders) + 1
-        self._next_driver_id = max(int(d["driver_id"]) for d in self.drivers) + 1
+    def _set_orders_and_drivers(
+        self,
+        orders: list[dict[str, Any]],
+        drivers: list[dict[str, Any]],
+    ) -> None:
+        """Replace in-memory orders/drivers and reset viewport / pending overlays."""
+        self.orders = list(orders)
+        self.drivers = list(drivers)
+        self._next_order_id = (
+            max(int(o["order_id"]) for o in self.orders) + 1 if self.orders else 1
+        )
+        self._next_driver_id = (
+            max(int(d["driver_id"]) for d in self.drivers) + 1 if self.drivers else 1
+        )
         self._manual_view_xlim = None
         self._manual_view_ylim = None
         if self._pending_coord is not None:
             self._pending_coord = None
             self._set_overlay_visible(False)
+
+    def _load_sample(self) -> None:
+        # Synthetic clicks never invent ``preferred_minute``; CSV can include it when needed for VRPTW.
+        self._set_orders_and_drivers(synthetic_orders(18, seed=8), synthetic_drivers(4, seed=8))
         self._redraw_input()
 
     def _reset(self) -> None:
@@ -614,13 +647,13 @@ class VisualOsrmApp:
             return
 
         merged, _ = merge_same_location_orders(self.orders)
-        labels, _ = cluster_deliveries_dbscan(merged, eps_km=1.4, min_samples=2)
+        labels, _ = cluster_deliveries_dbscan(merged, eps_km=_DBSCAN_EPS_KM, min_samples=2)
         clusters = stops_by_cluster(labels)
         assignment = assign_nearest_driver(clusters, merged, self.drivers)
         results, pipeline_info = run_optimized_routes(
             self.orders,
             self.drivers,
-            dbscan_eps_km=1.4,
+            dbscan_eps_km=_DBSCAN_EPS_KM,
             use_osrm=True,
             osrm_base_url=self.osrm_base_url,
             use_vrptw=self.use_vrptw,
@@ -674,9 +707,40 @@ class VisualOsrmApp:
             fontweight="bold",
         )
         fig.text(0.5, 0.02, summary, ha="center", family="monospace", fontsize=9)
-        path = self.out_dir / "output_osrm_visual_process.png"
+        run_stamp = new_run_stamp_utc()
+        path = output_images_dir(self.out_dir) / f"osrm_visual_process_{run_stamp}.png"
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.show(block=False)
+
+        csv_path = output_csv_dir(self.out_dir) / f"pipeline_run_{run_stamp}.csv"
+        write_pipeline_run_csv(
+            csv_path,
+            source="visual_osrm_app",
+            orders=list(self.orders),
+            drivers=list(self.drivers),
+            merged=merged,
+            labels=labels,
+            assignment=assignment,
+            results=results,
+            savings=savings,
+            pipeline_info=pipeline_info,
+            dbscan_eps_km=_DBSCAN_EPS_KM,
+            use_osrm=True,
+        )
+        json_path = output_json_dir(self.out_dir) / f"pipeline_run_{run_stamp}.json"
+        report = build_pipeline_report_dict(
+            merged=merged,
+            labels=labels,
+            assignment=assignment,
+            results=results,
+            savings=savings,
+            pipeline_info=pipeline_info,
+            run_stamp=run_stamp,
+            run_source="visual_osrm_app",
+            simulations=None,
+        )
+        save_pipeline_report_json(json_path, report)
+
         eta_lines: list[str] = ["ETA per order:"]
         on_time = 0
         late = 0
@@ -717,6 +781,8 @@ class VisualOsrmApp:
                 status_label,
                 "",
                 f"Saved: {path.name}",
+                f"CSV: output/csv/{csv_path.name}",
+                f"JSON: output/json/{json_path.name}",
                 "",
                 summary,
                 "",
@@ -972,12 +1038,16 @@ def run_visual_osrm_app(
     *,
     viz_mode: str = "map",
     initial_use_vrptw: bool = False,
+    initial_orders: list[dict[str, Any]] | None = None,
+    initial_drivers: list[dict[str, Any]] | None = None,
 ) -> None:
     app = VisualOsrmApp(
         osrm_base_url=osrm_base_url,
         out_dir=out_dir,
         viz_mode=viz_mode,
         initial_use_vrptw=initial_use_vrptw,
+        initial_orders=initial_orders,
+        initial_drivers=initial_drivers,
     )
     app.show()
 
