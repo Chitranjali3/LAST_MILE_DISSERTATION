@@ -132,6 +132,41 @@ def synthetic_orders(
     return orders[:n]
 
 
+def hydrate_synthetic_orders_for_vrptw_visual(
+    orders: list[dict[str, Any]],
+    *,
+    window_half_min: float = 30.0,
+    key_decimals: int = 5,
+) -> list[dict[str, Any]]:
+    """Add ``preferred_minute`` and ±``window_half_min`` windows for VRPTW demos.
+
+    Drops that share the same rounded coordinates (Rule 1 merge) share one
+    consensus preferred minute so merged stops stay consistent.
+    """
+    key_fn = lambda d: (round(d[0], key_decimals), round(d[1], key_decimals))
+    pref_acc: dict[tuple[float, float], list[float]] = {}
+    for o in orders:
+        k = key_fn(tuple(o["drop"]))
+        lo, hi = float(o["time_window"][0]), float(o["time_window"][1])
+        mid = (lo + hi) / 2.0
+        pref_acc.setdefault(k, []).append(mid)
+    pref_by_drop: dict[tuple[float, float], float] = {
+        k: float(sum(vals) / len(vals)) for k, vals in pref_acc.items()
+    }
+    out: list[dict[str, Any]] = []
+    for o in orders:
+        k = key_fn(tuple(o["drop"]))
+        pref_raw = pref_by_drop[k]
+        pref = float(int(round(pref_raw)))
+        lo = max(0.0, pref - window_half_min)
+        hi = min(24 * 60 - 1.0, pref + window_half_min)
+        row = dict(o)
+        row["preferred_minute"] = pref
+        row["time_window"] = [lo, hi]
+        out.append(row)
+    return out
+
+
 def synthetic_drivers(
     k: int = 4,
     seed: int | None = 42,

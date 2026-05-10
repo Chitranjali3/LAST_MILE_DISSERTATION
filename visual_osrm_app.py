@@ -14,6 +14,9 @@ Controls:
       is geographically closer to the driver.
     - Click "Run pipeline" to see input, clustering/assignment, and route output
       (writes ``output/csv/``, ``output/json/``, and ``output/images/osrm_visual_process_<stamp>.png``).
+    - Click "Load sample" — uses ``data/sample_orders.csv`` when VRPTW is off, or
+      ``data/sample_orders_vrptw.csv`` (preferred times + tight windows) when VRPTW is on;
+      drivers always come from ``data/sample_drivers.csv``.
     - Use "View: OSM" / "View: grid" to switch map tiles vs grid-only (also ``--viz-mode``).
 """
 
@@ -40,7 +43,14 @@ from pipeline_csv_log import (
     write_pipeline_run_csv,
 )
 from map_basemap import normalize_viz_mode, pad_lonlat_extent, try_osm_basemap
-from utils import ODISHA_REGION_CENTER, synthetic_drivers, synthetic_orders
+from utils import (
+    ODISHA_REGION_CENTER,
+    hydrate_synthetic_orders_for_vrptw_visual,
+    load_drivers_csv,
+    load_orders_csv,
+    synthetic_drivers,
+    synthetic_orders,
+)
 
 
 # ±30 min default tolerance around the user's preferred delivery time. Tight
@@ -396,8 +406,30 @@ class VisualOsrmApp:
             self._set_overlay_visible(False)
 
     def _load_sample(self) -> None:
-        # Synthetic clicks never invent ``preferred_minute``; CSV can include it when needed for VRPTW.
-        self._set_orders_and_drivers(synthetic_orders(18, seed=8), synthetic_drivers(4, seed=8))
+        """Load ``data/sample_orders*.csv`` + ``sample_drivers.csv`` (VRPTW vs plain by toggle)."""
+        root = Path(__file__).resolve().parent
+        data_dir = root / "data"
+        try:
+            drivers = load_drivers_csv(data_dir / "sample_drivers.csv")
+            if self.use_vrptw:
+                orders = load_orders_csv(data_dir / "sample_orders_vrptw.csv")
+            else:
+                orders = load_orders_csv(data_dir / "sample_orders.csv")
+            self._last_osrm_status = (
+                "Sample: data/"
+                + ("sample_orders_vrptw.csv" if self.use_vrptw else "sample_orders.csv")
+                + " + sample_drivers.csv"
+            )
+        except (OSError, ValueError) as e:
+            drivers = synthetic_drivers(4, seed=8)
+            orders = synthetic_orders(18, seed=8)
+            if self.use_vrptw:
+                orders = hydrate_synthetic_orders_for_vrptw_visual(
+                    orders, window_half_min=_VRPTW_WINDOW_HALF_MIN
+                )
+            self._last_osrm_status = f"Sample CSV unavailable ({e}); using synthetic fallback."
+
+        self._set_orders_and_drivers(orders, drivers)
         self._redraw_input()
 
     def _reset(self) -> None:
