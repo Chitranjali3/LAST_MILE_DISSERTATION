@@ -187,7 +187,8 @@ def main() -> None:
                 "stop_sequence": r.stop_order_local,
                 "ga_open_tour_km": r.ga_tour_km,
                 "dijkstra_graph_km": r.dijkstra_graph_km,
-                "astar_quick_route_km": r.astar_leg_km,
+                "astar_fastest_route_km": r.astar_leg_km,
+                "astar_fastest_route_min": r.astar_leg_min,
                 "eta_arrival_min_from_departure": r.eta_arrival_min,
                 "osrm_road_km": r.osrm_road_km,
                 "osrm_duration_min": r.osrm_duration_min,
@@ -196,7 +197,7 @@ def main() -> None:
                 "effective_duration_min": r.effective_duration_min,
                 "effective_distance_source": r.effective_distance_source,
                 "effective_time_source": r.effective_time_source,
-                "dijkstra_equals_astar_legs": r.dijkstra_star_equal,
+                "dijkstra_equals_astar_distance_legs": r.dijkstra_star_equal,
                 "vrptw_ok": r.vrptw_ok,
                 "vrptw": r.vrptw_detail,
             }

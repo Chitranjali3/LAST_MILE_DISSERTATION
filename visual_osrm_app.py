@@ -64,6 +64,10 @@ class VisualOsrmApp:
         self._last_pipeline: tuple[Any, ...] | None = None
         self._output_fig: plt.Figure | None = None
         self._last_osrm_status: str = "OSRM: idle (run pipeline to probe)"
+        self._manual_view_xlim: tuple[float, float] | None = None
+        self._manual_view_ylim: tuple[float, float] | None = None
+        self._drag_press_data: tuple[float, float, tuple[float, float], tuple[float, float]] | None = None
+        self._dragging = False
 
         self.fig = plt.figure(figsize=(12.5, 7.2))
         self.ax = self.fig.add_axes([0.06, 0.14, 0.70, 0.78])
@@ -82,7 +86,9 @@ class VisualOsrmApp:
         self._buttons.append(self._viz_mode_btn)
         self._sync_viz_button_label()
 
-        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
+        self.fig.canvas.mpl_connect("button_press_event", self._on_mouse_press)
+        self.fig.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
+        self.fig.canvas.mpl_connect("button_release_event", self._on_mouse_release)
         self._redraw_input()
 
     def _sync_viz_button_label(self) -> None:
@@ -113,6 +119,8 @@ class VisualOsrmApp:
         self.drivers = synthetic_drivers(4, seed=8)
         self._next_order_id = max(int(o["order_id"]) for o in self.orders) + 1
         self._next_driver_id = max(int(d["driver_id"]) for d in self.drivers) + 1
+        self._manual_view_xlim = None
+        self._manual_view_ylim = None
         self._redraw_input()
 
     def _reset(self) -> None:
@@ -121,12 +129,53 @@ class VisualOsrmApp:
         self._next_order_id = 1
         self._next_driver_id = 1
         self._last_pipeline = None
+        self._manual_view_xlim = None
+        self._manual_view_ylim = None
+        self._drag_press_data = None
+        self._dragging = False
         if self._output_fig is not None:
             plt.close(self._output_fig)
             self._output_fig = None
         self._redraw_input()
 
-    def _on_click(self, event: Any) -> None:
+    def _on_mouse_press(self, event: Any) -> None:
+        if event.inaxes != self.ax or event.button != 1 or event.xdata is None or event.ydata is None:
+            return
+        self._drag_press_data = (
+            float(event.xdata),
+            float(event.ydata),
+            tuple(self.ax.get_xlim()),
+            tuple(self.ax.get_ylim()),
+        )
+        self._dragging = False
+
+    def _on_mouse_move(self, event: Any) -> None:
+        if self._drag_press_data is None or event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        start_x, start_y, press_xlim, press_ylim = self._drag_press_data
+        dx = float(event.xdata) - start_x
+        dy = float(event.ydata) - start_y
+        # Small threshold avoids turning ordinary clicks into drags.
+        if not self._dragging and (abs(dx) > 0.0008 or abs(dy) > 0.0008):
+            self._dragging = True
+        if not self._dragging:
+            return
+        new_xlim = (press_xlim[0] - dx, press_xlim[1] - dx)
+        new_ylim = (press_ylim[0] - dy, press_ylim[1] - dy)
+        self._manual_view_xlim = new_xlim
+        self._manual_view_ylim = new_ylim
+        self.ax.set_xlim(new_xlim)
+        self.ax.set_ylim(new_ylim)
+        self.fig.canvas.draw_idle()
+
+    def _on_mouse_release(self, event: Any) -> None:
+        if self._drag_press_data is None or event.button != 1:
+            return
+        was_dragging = self._dragging
+        self._drag_press_data = None
+        self._dragging = False
+        if was_dragging:
+            return
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
             return
         lat, lon = float(event.ydata), float(event.xdata)
@@ -158,7 +207,10 @@ class VisualOsrmApp:
         self.ax.set_title("Graphical input: click to add orders or drivers")
         self.ax.set_aspect("equal", adjustable="box")
 
-        if not self.orders and not self.drivers:
+        if self._manual_view_xlim is not None and self._manual_view_ylim is not None:
+            self.ax.set_xlim(self._manual_view_xlim)
+            self.ax.set_ylim(self._manual_view_ylim)
+        elif not self.orders and not self.drivers:
             # Default window: Bhubaneswar / wider Odisha coast-inland area
             lat_c, lon_c = ODISHA_REGION_CENTER
             self.ax.set_xlim(lon_c - 0.10, lon_c + 0.10)
@@ -209,7 +261,8 @@ class VisualOsrmApp:
                 "Tiles/grid: View button",
                 "bottom-right.",
                 "",
-                "Click map to add points.",
+                "Click to add points.",
+                "Drag to pan map view.",
                 "Run needs one driver",
                 "and one order.",
             ]
@@ -270,7 +323,7 @@ class VisualOsrmApp:
             f"Routes: {len(results)} | "
             f"GA: {savings['optimized_ga_open_tour_km']:.2f} km | "
             f"Dijkstra: {savings['optimized_dijkstra_graph_km']:.2f} km | "
-            f"A* quick: {savings['optimized_astar_quick_km']:.2f} km | "
+            f"A* fastest: {savings['optimized_astar_quick_km']:.2f} km | "
             f"OSRM: {savings['optimized_osrm_road_km']:.2f} km | "
             f"{status_label} | counts: {status_counts}"
         )

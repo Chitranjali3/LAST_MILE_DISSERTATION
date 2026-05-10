@@ -58,7 +58,7 @@ def scenario_collinear_intermediate() -> dict[str, Any]:
         "best_perm_indices": perm,
         "open_tour_km": chained,
         "dijkstra_chain_km": dij_km,
-        "astar_chain_km": ast_km,
+        "astar_fastest_chain_km": ast_km,
         "sum_independent_one_way_km": fragmented,
         "improvement_km": max(0.0, fragmented - chained),
     }

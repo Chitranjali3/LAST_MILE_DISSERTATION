@@ -19,7 +19,7 @@ from core.batching import greedy_dynamic_batch, merge_same_location_orders
 from core.clustering import cluster_deliveries_dbscan
 from core.driver_assignment import assign_nearest_driver, stops_by_cluster
 from core.ga_optimizer import optimize_route_ga, tour_distance_km
-from core.graph_search import astar_shortest_path, build_geographic_graph, dijkstra_shortest_path
+from core.graph_search import astar_fastest_path, build_geographic_graph, dijkstra_shortest_path
 from core.osrm_client import OsrmClient
 from core.vrptw import VRPTWConfig, slack_time_windows, validate_route_feasibility
 from utils import haversine_km
@@ -41,6 +41,7 @@ class RouteResult:
     ga_tour_km: float
     dijkstra_graph_km: float
     astar_leg_km: float
+    astar_leg_min: float
     eta_arrival_min: list[float]
     dijkstra_star_equal: bool
     vrptw_ok: bool
@@ -147,12 +148,12 @@ def cluster_route_graph_metrics(
     """
     On the DBSCAN cluster's kNN geographic graph (driver + ordered drops):
 
-    - Dijkstra per leg → summed ``dijkstra_graph_km`` (shortest-path distance).
-    - A* per leg → summed ``astar_leg_km`` and used with ``vr_cfg`` speed to build
-      ETA (minutes from departure until arrival at each drop, before service).
+    - Dijkstra per leg on ``km`` weights → summed ``dijkstra_graph_km``.
+    - A* per leg on ``minutes`` weights → summed ``astar_leg_km`` (distance
+      traveled along fastest-time path) and ETA from ``astar_leg_min``.
 
     Returns ``(dijkstra_km, astar_km, leg_diag, eta_arrival_min)`` where leg_diag is
-    ``(dijkstra_km, astar_km, abs(delta))`` per leg.
+    ``(dijkstra_km, astar_km, astar_min)`` per leg.
     """
     cfg = vr_cfg or VRPTWConfig()
     if not ordered_drops:
@@ -166,18 +167,16 @@ def cluster_route_graph_metrics(
     eta_arrival: list[float] = []
     clock = 0.0
     prev = driver_loc
-    speed = cfg.avg_speed_kmh
     service = cfg.service_time_min
 
     for nxt in ordered_drops:
         _, dk = dijkstra_shortest_path(G, prev, nxt)
-        _, ak = astar_shortest_path(G, prev, nxt)
+        _, ak_km, ak_min = astar_fastest_path(G, prev, nxt)
         dijkstra_sum += dk
-        astar_sum += ak
-        diag.append((dk, ak, abs(dk - ak)))
+        astar_sum += ak_km
+        diag.append((dk, ak_km, ak_min))
 
-        travel_min = (ak / speed) * 60.0 if speed > 0 else 0.0
-        clock += travel_min
+        clock += ak_min
         eta_arrival.append(clock)
         clock += service
 
@@ -192,7 +191,7 @@ def astar_tour_length(
     *,
     knn: int | None = 4,
 ) -> tuple[float, list[tuple[float, float, float]]]:
-    """Backward-compatible: returns (A* tour km, leg diagnostics) only."""
+    """Backward-compatible: returns (A* fastest-time path km, leg diagnostics)."""
     _dij, ak, diag, _eta = cluster_route_graph_metrics(
         driver_loc, ordered_drops, knn=knn, vr_cfg=VRPTWConfig()
     )
@@ -262,7 +261,8 @@ def run_optimized_routes(
         dij_km, ast_km, leg_diag, eta_min = cluster_route_graph_metrics(
             tuple(drv["current_location"]), ordered_drops, vr_cfg=vr_cfg
         )
-        leg_equal = all(abs(d[2]) <= 1e-9 for d in leg_diag)
+        astar_total_min = sum(d[2] for d in leg_diag)
+        leg_equal = all(abs(d[0] - d[1]) <= 1e-9 for d in leg_diag)
 
         ok, detail = validate_route_feasibility(
             tuple(drv["current_location"]),
@@ -316,6 +316,7 @@ def run_optimized_routes(
                 ga_tour_km=ga_km,
                 dijkstra_graph_km=dij_km,
                 astar_leg_km=ast_km,
+                astar_leg_min=astar_total_min,
                 eta_arrival_min=eta_min,
                 dijkstra_star_equal=leg_equal,
                 vrptw_ok=ok,

@@ -273,6 +273,7 @@ def test_select_route_polyline_falls_back_when_osrm_geometry_degenerate():
     no_geometry = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
         metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        astar_leg_min=2.0,
         eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={}, osrm_geometry=None,
     )
@@ -281,6 +282,7 @@ def test_select_route_polyline_falls_back_when_osrm_geometry_degenerate():
     degenerate_geometry = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
         metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        astar_leg_min=2.0,
         eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={},
         osrm_geometry=[driver_start, driver_start],  # zero-length artifact
@@ -295,6 +297,7 @@ def test_select_route_polyline_falls_back_when_osrm_geometry_degenerate():
     valid = RouteResult(
         cluster_id=0, driver_id=1, stop_order_local=[0, 1], drop_coords_ordered=drops,
         metas_ordered=[], ga_tour_km=1.0, dijkstra_graph_km=1.0, astar_leg_km=1.0,
+        astar_leg_min=2.0,
         eta_arrival_min=[], dijkstra_star_equal=True,
         vrptw_ok=True, vrptw_detail={}, osrm_geometry=real_geometry,
     )
